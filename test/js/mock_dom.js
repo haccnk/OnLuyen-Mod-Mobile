@@ -35,6 +35,10 @@ class MockElement {
     return this.childNodes.filter((n) => n.nodeType === 1);
   }
 
+  get isContentEditable() {
+    return this.getAttribute("contenteditable") === "true";
+  }
+
   get textContent() {
     return this.childNodes.map((n) => (n.nodeType === 3 ? n.nodeValue : n.textContent)).join("");
   }
@@ -252,17 +256,17 @@ function matchesSimpleSelector(el, sel) {
   if (!el || el.nodeType !== 1 || !sel) return false;
   let rest = sel.trim();
 
-  // Attribute filters
-  const attrMatches = [];
-  rest = rest.replace(/\[([^\]]+)\]/g, (_, inner) => {
-    attrMatches.push(inner);
-    return "";
-  });
-
-  // :not(...)
+  // :not(...) first so nested [attr] inside :not() is not treated as positive filter
   const notMatches = [];
   rest = rest.replace(/:not\(([^)]+)\)/g, (_, inner) => {
     notMatches.push(inner);
+    return "";
+  });
+
+  // Attribute filters (= and *=)
+  const attrMatches = [];
+  rest = rest.replace(/\[([^\]]+)\]/g, (_, inner) => {
+    attrMatches.push(inner);
     return "";
   });
 
@@ -292,6 +296,14 @@ function matchesSimpleSelector(el, sel) {
   }
 
   for (const attrExpr of attrMatches) {
+    const containsIdx = attrExpr.indexOf("*=");
+    if (containsIdx !== -1) {
+      const name = attrExpr.slice(0, containsIdx).trim();
+      const expected = attrExpr.slice(containsIdx + 2).trim().replace(/^["']|["']$/g, "");
+      const actual = el.getAttribute(name) || "";
+      if (!actual.includes(expected)) return false;
+      continue;
+    }
     const eqIdx = attrExpr.indexOf("=");
     if (eqIdx === -1) {
       if (el.getAttribute(attrExpr.trim()) === null) return false;
@@ -363,7 +375,10 @@ function createTestEnvironment({ innerWidth = 1280, innerHeight = 800, url = "ht
       env.pageXOffset = scrollState.x;
       env.pageYOffset = scrollState.y;
     },
-    getComputedStyle(el) {
+    getComputedStyle(el, pseudo = null) {
+      if (pseudo) {
+        return (el._pseudoStyles && el._pseudoStyles[pseudo]) || {};
+      }
       return el._computedStyle || el.style || {};
     },
     requestAnimationFrame(cb) {
@@ -427,6 +442,7 @@ function el(doc, tag, opts = {}, children = []) {
   if (opts.checked !== undefined) node.checked = opts.checked;
   if (opts.style) Object.assign(node.style, opts.style);
   if (opts.cs) node.setComputedStyle(opts.cs);
+  if (opts.pseudo) node._pseudoStyles = opts.pseudo;
   if (opts.rect) node.setRect(opts.rect);
   if (opts.attrs) {
     for (const [k, v] of Object.entries(opts.attrs)) node.setAttribute(k, v);

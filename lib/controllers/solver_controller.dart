@@ -41,21 +41,48 @@ class SolverController extends ChangeNotifier {
   double _pageProgress = 0.0;
   String _currentUrl = targetUrl;
   String? _completionBannerMessage;
+  String _injectJs = '';
+  String _extractorJs = '';
+  String _agentJs = '';
+  Future<bool>? _injectFuture;
+  Timer? _postLoadRecheckTimer;
 
-  SolverController({
-    required this.storage,
+  factory SolverController({
+    required StorageService storage,
     KeyPoolService? keyPool,
     GeminiClient? geminiClient,
     MediaFetcherService? mediaFetcher,
     ExportService? exportService,
-  })  : keyPool = keyPool ?? KeyPoolService(storage: storage),
-        geminiClient = geminiClient ?? GeminiClient(),
-        mediaFetcher = mediaFetcher ?? MediaFetcherService(),
-        exportService = exportService ?? ExportService(),
-        multiAgentSolver = MultiAgentSolver(
-          keyPool: keyPool ?? KeyPoolService(storage: storage),
-          client: geminiClient ?? GeminiClient(),
-        );
+  }) {
+    final resolvedPool = keyPool ?? KeyPoolService(storage: storage);
+    final resolvedClient = geminiClient ?? GeminiClient();
+    return SolverController._internal(
+      storage: storage,
+      keyPool: resolvedPool,
+      geminiClient: resolvedClient,
+      multiAgentSolver: MultiAgentSolver(
+        keyPool: resolvedPool,
+        client: resolvedClient,
+      ),
+      mediaFetcher: mediaFetcher ?? MediaFetcherService(),
+      exportService: exportService ?? ExportService(),
+    );
+  }
+
+  SolverController._internal({
+    required this.storage,
+    required this.keyPool,
+    required this.geminiClient,
+    required this.multiAgentSolver,
+    required this.mediaFetcher,
+    required this.exportService,
+  });
+
+  @override
+  void dispose() {
+    _postLoadRecheckTimer?.cancel();
+    super.dispose();
+  }
 
   SolverUiState get state => _state;
   List<ApiKeyEntry> get apiKeys => List.unmodifiable(_apiKeys);
@@ -236,6 +263,95 @@ class SolverController extends ChangeNotifier {
     );
   }
 
+  void registerAssetScripts({
+    required String injectJs,
+    required String extractorJs,
+    required String agentJs,
+  }) {
+    _injectJs = injectJs;
+    _extractorJs = extractorJs;
+    _agentJs = agentJs;
+  }
+
+  Map<String, dynamic>? _decodeJsonMap(dynamic raw) {
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    if (raw is String && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  Future<bool> ensureScriptsInjected({bool pushConfig = true}) {
+    final existing = _injectFuture;
+    if (existing != null) return existing;
+    final fut = _ensureScriptsInjectedImpl(pushConfig: pushConfig);
+    _injectFuture = fut;
+    return fut.whenComplete(() {
+      if (identical(_injectFuture, fut)) {
+        _injectFuture = null;
+      }
+    });
+  }
+
+  Future<bool> _ensureScriptsInjectedImpl({required bool pushConfig}) async {
+    final ctrl = _webViewController;
+    if (ctrl == null) return false;
+    try {
+      final rawProbe = await ctrl.evaluateJavascript(
+        source:
+            '(function(){return JSON.stringify({i:Boolean(window.__onluyenModInjected),e:Boolean(window.__OnLuyenExtractor),a:Boolean(window.__OnLuyenMobileAgent)});})()',
+      );
+      final probeMap = _decodeJsonMap(rawProbe);
+      final hasInject = probeMap?['i'] == true;
+      final hasExtractor = probeMap?['e'] == true;
+      final hasAgent = probeMap?['a'] == true;
+
+      if (!hasInject && _injectJs.isNotEmpty) {
+        await ctrl.evaluateJavascript(source: _injectJs);
+      }
+      if (!hasExtractor && _extractorJs.isNotEmpty) {
+        await ctrl.evaluateJavascript(source: _extractorJs);
+      }
+      if (!hasAgent && _agentJs.isNotEmpty) {
+        await ctrl.evaluateJavascript(source: _agentJs);
+      }
+      if (pushConfig) {
+        await _pushConfigToWebView();
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> onPageLoadFinished(String? url) async {
+    updateNavigationProgress(1.0, url);
+    await ensureScriptsInjected();
+    _postLoadRecheckTimer?.cancel();
+    _postLoadRecheckTimer = Timer(const Duration(milliseconds: 500), () {
+      unawaited(ensureScriptsInjected());
+    });
+  }
+
+  Future<void> onRouteHistoryUpdated(String? url) async {
+    if (url != null && url.isNotEmpty) {
+      _currentUrl = url;
+      notifyListeners();
+    }
+    await ensureScriptsInjected();
+    final ctrl = _webViewController;
+    if (ctrl == null) return;
+    final encodedUrl = jsonEncode(url ?? '');
+    try {
+      await ctrl.evaluateJavascript(
+        source: 'window.__OnLuyenMobileAgent && window.__OnLuyenMobileAgent.onRouteChanged($encodedUrl);',
+      );
+    } catch (_) {}
+  }
+
   void clearCompletionBanner() {
     _completionBannerMessage = null;
     notifyListeners();
@@ -298,6 +414,8 @@ class SolverController extends ChangeNotifier {
       nextPill = PillVisualState.error;
     } else if (statusTxt.contains('🧠') || statusTxt.contains('Đang giải') || statusTxt.contains('🔄')) {
       nextPill = PillVisualState.scanning;
+    } else if (statusTxt.startsWith('🔍') || statusTxt.startsWith('ℹ️')) {
+      nextPill = PillVisualState.idle;
     } else if (meta != null || statusTxt.startsWith('✅') || statusTxt.startsWith('Đã giải')) {
       nextPill = PillVisualState.solved;
     }
@@ -423,7 +541,11 @@ class SolverController extends ChangeNotifier {
           : 'Chế độ bình thường (Mod đang tắt)',
     );
     notifyListeners();
-    await _pushConfigToWebView();
+    if (next) {
+      await ensureScriptsInjected(pushConfig: true);
+    } else {
+      await _pushConfigToWebView();
+    }
   }
 
   Future<void> hideAndDisableMod() async {
@@ -485,14 +607,83 @@ class SolverController extends ChangeNotifier {
     if (!_state.enabled) {
       await toggleEnabled(true);
     }
+    await ensureScriptsInjected();
     _state = _state.copyWith(
       pillState: PillVisualState.scanning,
       statusText: '🔍 Đang quét lại màn hình...',
     );
     notifyListeners();
-    await ctrl.evaluateJavascript(
-      source: 'window.__OnLuyenMobileAgent && window.__OnLuyenMobileAgent.forceScanNow();',
-    );
+    try {
+      final rawRes = await ctrl.evaluateJavascript(
+        source:
+            '(function(){return window.__OnLuyenMobileAgent ? JSON.stringify(window.__OnLuyenMobileAgent.forceScanNow()) : JSON.stringify({reason:"agent_missing"});})()',
+      );
+      final resMap = _decodeJsonMap(rawRes);
+      final reason = (resMap?['reason'] ?? '').toString();
+      if (reason == 'agent_missing') {
+        _state = _state.copyWith(
+          pillState: PillVisualState.error,
+          statusText: '⚠️ Agent chưa sẵn sàng trên trang — hãy bấm Tải lại trang.',
+        );
+        notifyListeners();
+      } else if (reason == 'not_quiz_page') {
+        _state = _state.copyWith(
+          pillState: PillVisualState.idle,
+          statusText: 'ℹ️ Trang hiện tại chưa vào giao diện làm bài.',
+        );
+        notifyListeners();
+      } else if (reason == 'no_question_detected') {
+        final diag = resMap?['diag'];
+        final diagMap = diag is Map ? Map<String, dynamic>.from(diag) : null;
+        final countsInfo = diagMap == null
+            ? ''
+            : ' (B:${diagMap['tables'] ?? 0}, R:${diagMap['radios'] ?? 0}, I:${diagMap['inputs'] ?? 0})';
+        _state = _state.copyWith(
+          pillState: PillVisualState.idle,
+          statusText: '🔍 Chưa thấy câu hỏi trên màn hình$countsInfo',
+        );
+        notifyListeners();
+      } else if (reason == 'already_solved_sig') {
+        _state = _state.copyWith(
+          pillState: PillVisualState.solved,
+          statusText: '✅ Câu hiện tại đã giải xong.',
+        );
+        notifyListeners();
+      }
+    } catch (_) {
+      _state = _state.copyWith(
+        pillState: PillVisualState.idle,
+        statusText: '⚠️ Không đọc được phản hồi từ WebView.',
+      );
+      notifyListeners();
+    }
+  }
+
+  Future<String> fetchDiagnosticsSummary() async {
+    final ctrl = _webViewController;
+    if (ctrl == null) return 'WebView chưa khởi tạo.';
+    final injected = await ensureScriptsInjected(pushConfig: false);
+    try {
+      final raw = await ctrl.evaluateJavascript(
+        source:
+            '(function(){return window.__OnLuyenMobileAgent ? JSON.stringify(window.__OnLuyenMobileAgent.getDiagnostics()) : "";})()',
+      );
+      final diag = _decodeJsonMap(raw);
+      if (diag == null) {
+        return 'Chưa lấy được chẩn đoán (injected=$injected, url=$_currentUrl)';
+      }
+      final dom = diag['dom'] is Map ? Map<String, dynamic>.from(diag['dom'] as Map) : const <String, dynamic>{};
+      final letters = dom['mcqLetters'] is Map
+          ? Map<String, dynamic>.from(dom['mcqLetters'] as Map)
+          : const <String, dynamic>{};
+      return 'url=${diag['url']} | quiz=${diag['isQuiz']} | on=${diag['isExtensionEnabled']} | '
+          'busy=${diag['isProcessing']} | sync=${diag['configSynced']} | '
+          'vw=${dom['vw']}x${dom['vh']} | tbl=${dom['tables']} rad=${dom['radios']} inp=${dom['inputs']} ifr=${dom['iframes']} | '
+          'ABCD=${letters['A'] ?? 0}/${letters['B'] ?? 0}/${letters['C'] ?? 0}/${letters['D'] ?? 0} | '
+          'TF=${dom['tfTrue'] ?? 0}/${dom['tfFalse'] ?? 0} blk=${dom['multiBlocks'] ?? 0}';
+    } catch (e) {
+      return 'Lỗi chẩn đoán (injected=$injected): $e';
+    }
   }
 
   Future<void> retryQuestion(int? targetQuestionNumber) async {
@@ -506,6 +697,7 @@ class SolverController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    await ensureScriptsInjected();
     final arg = targetQuestionNumber == null ? 'null' : targetQuestionNumber.toString();
     _state = _state.copyWith(
       pillState: PillVisualState.scanning,

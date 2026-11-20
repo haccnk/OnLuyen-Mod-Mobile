@@ -387,7 +387,7 @@ NGUYÊN TẮC TỐI THƯỢNG:
           lastErr = err;
           final msg = err.toString();
           await keyPool.markKeyPenalty(slot.apiKey, model, msg);
-          if (msg.contains('HTTP 404') || msg.contains('429') || msg.contains('RESOURCE_EXHAUSTED')) {
+          if (msg.contains('HTTP 404')) {
             break;
           }
         }

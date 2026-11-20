@@ -1,6 +1,7 @@
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../controllers/solver_controller.dart';
 import '../../models/solver_models.dart';
@@ -21,6 +22,8 @@ class ControlBottomSheet extends StatefulWidget {
 class _ControlBottomSheetState extends State<ControlBottomSheet> {
   final TextEditingController _retryNumController = TextEditingController();
   bool _showRetryNumberInput = false;
+  String? _debugSummary;
+  bool _isLoadingDebug = false;
 
   @override
   void dispose() {
@@ -502,9 +505,79 @@ class _ControlBottomSheetState extends State<ControlBottomSheet> {
               ),
             ],
           ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppTheme.skyAccent,
+              side: BorderSide(color: AppTheme.withAlphaHex(AppTheme.skyAccent, 110)),
+              padding: const EdgeInsets.symmetric(vertical: 9),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            onPressed: _isLoadingDebug ? null : _runDiagnostics,
+            icon: Icon(
+              _isLoadingDebug ? Icons.hourglass_top_rounded : Icons.bug_report_outlined,
+              size: 16,
+            ),
+            label: Text(
+              _isLoadingDebug ? 'Đang lấy chẩn đoán...' : 'Chẩn đoán trang (Debug)',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+          if (_debugSummary != null) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(9),
+              decoration: BoxDecoration(
+                color: AppTheme.bgDeep,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppTheme.borderSubtle),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: SelectableText(
+                      _debugSummary!,
+                      style: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 11,
+                        height: 1.35,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Sao chép chẩn đoán',
+                    onPressed: () async {
+                      final messenger = ScaffoldMessenger.of(context);
+                      await Clipboard.setData(ClipboardData(text: _debugSummary!));
+                      if (!mounted) return;
+                      messenger.showSnackBar(
+                        const SnackBar(
+                          content: Text('Đã sao chép chẩn đoán'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.copy_rounded, size: 15, color: AppTheme.skyAccent),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  Future<void> _runDiagnostics() async {
+    setState(() => _isLoadingDebug = true);
+    final summary = await widget.controller.fetchDiagnosticsSummary();
+    if (!mounted) return;
+    setState(() {
+      _debugSummary = summary;
+      _isLoadingDebug = false;
+    });
   }
 
   Widget _buildModeSelector(SolverUiState state) {

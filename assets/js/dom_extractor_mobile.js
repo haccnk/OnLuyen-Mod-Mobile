@@ -29,6 +29,7 @@
       rect: new WeakMap(),
       cs: new WeakMap(),
       hidden: new WeakMap(),
+      hiddenChain: new WeakMap(),
       navSelf: new WeakMap(),
       navInside: new WeakMap()
     };
@@ -73,18 +74,6 @@
     return cs;
   }
 
-  function getEffectiveRect(el) {
-    const r = safeRect(el);
-    if (r.width > 0 && r.height > 0) return r;
-    let cur = el?.parentElement;
-    for (let depth = 0; depth < 3 && cur && cur.nodeType === 1; depth++) {
-      const pr = safeRect(cur);
-      if (pr.width > 0 && pr.height > 0) return pr;
-      cur = cur.parentElement;
-    }
-    return r;
-  }
-
   function isHiddenElement(el) {
     if (!el || el.nodeType !== 1) return false;
     if (_scanCache && _scanCache.hidden.has(el)) {
@@ -111,6 +100,50 @@
     }
     if (_scanCache) _scanCache.hidden.set(el, hidden);
     return hidden;
+  }
+
+  function isEffectivelyHidden(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (_scanCache && _scanCache.hiddenChain.has(el)) {
+      return _scanCache.hiddenChain.get(el);
+    }
+    const chain = [];
+    let cur = el;
+    let hidden = false;
+    while (cur && cur.nodeType === 1) {
+      const tag = (cur.tagName || "").toLowerCase();
+      if (_scanCache && _scanCache.hiddenChain.has(cur)) {
+        hidden = _scanCache.hiddenChain.get(cur);
+        break;
+      }
+      chain.push(cur);
+      if (isHiddenElement(cur)) {
+        hidden = true;
+        break;
+      }
+      if (tag === "body" || tag === "html") break;
+      cur = cur.parentElement;
+    }
+    if (_scanCache && chain.length > 0) {
+      for (const n of chain) _scanCache.hiddenChain.set(n, hidden);
+    }
+    return hidden;
+  }
+
+  function getEffectiveRect(el) {
+    if (!el || isEffectivelyHidden(el)) {
+      return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    }
+    const r = safeRect(el);
+    if (r.width > 0 && r.height > 0) return r;
+    let cur = el?.parentElement;
+    for (let depth = 0; depth < 3 && cur && cur.nodeType === 1; depth++) {
+      if (isHiddenElement(cur)) break;
+      const pr = safeRect(cur);
+      if (pr.width > 0 && pr.height > 0) return pr;
+      cur = cur.parentElement;
+    }
+    return r;
   }
 
   function closestMatching(el, predicate) {
@@ -501,8 +534,14 @@
       const r = safeRect(node);
       const w = Math.round(r.width || Number(node.getAttribute?.("width")) || node.width || 0);
       const h = Math.round(r.height || Number(node.getAttribute?.("height")) || node.height || 0);
+      const srcCls = `${src} ${cls}`;
+      const isUiIconName = /(icon|logo|avatar|emoji|badge|star|bookmark|report|speaker|audio|sound)/i.test(srcCls);
 
-      if (w > 24 || h > 20 || (w === 0 && h === 0 && src)) {
+      if (w > 0 && h > 0 && w <= 48 && h <= 48 && isUiIconName) {
+        return isMeaningfulAlt(alt) ? ` ${alt} ` : "";
+      }
+
+      if ((w >= 40 && h >= 28) || (w === 0 && h === 0 && src && !isUiIconName)) {
         state.visuals.push({
           type: "img",
           sig: `${src.slice(-64)}#${w}x${h}`,
@@ -650,12 +689,20 @@
     if (tag === "body" || tag === "html") return false;
 
     const vw = globalScope.innerWidth || 1280;
+    const vh = globalScope.innerHeight || 844;
     const isMobile = vw < 700;
     const r = safeRect(el);
     const cs = safeComputedStyle(el);
     const pos = String((cs && cs.position) || el.style?.position || "").toLowerCase();
     const isFixedOverlay = pos === "fixed";
     const clsId = `${el.className || ""} ${el.id || ""}`.toLowerCase();
+
+    // Khung đề toàn màn hình đặt position: fixed trên mobile không phải là nav/drawer
+    if (isMobile && isFixedOverlay && r.width > vw * 0.85 && r.height > vh * 0.65) {
+      return /(answer-sheet|question-palette|question-nav|quiz-sidebar|nav-panel|mobile-drawer|ant-drawer|drawer-content)/.test(
+        clsId
+      );
+    }
 
     // Luật hình học tương đối theo viewport:
     // Trên màn hình dọc mobile (vw < 700), bất kỳ khối nội dung chính không phải Drawer fixed
@@ -690,6 +737,12 @@
       const pills = countNumericPills(el);
       if (pills >= 5) {
         const text = getFastText(el);
+        if (/(?:Câu(?:\s+hỏi)?|Question)\s+\d+/i.test(text)) {
+          return false;
+        }
+        if (!isFixedOverlay && el.querySelector?.('input[type="radio"]')) {
+          return false;
+        }
         const nonDigitText = text.replace(/\d+/g, "").trim();
         if (/Phiếu trả lời|Danh sách câu|Câu đã làm|Câu chưa làm/i.test(text) && nonDigitText.length < 320) {
           return true;
@@ -773,7 +826,7 @@
   function findTF(root = document, _ignoreTop = true) {
     const tables = Array.from(root.querySelectorAll?.("table") || []);
     for (const table of tables) {
-      if (isInsideNavOrChrome(table) || isHiddenElement(table)) continue;
+      if (isEffectivelyHidden(table) || isInsideNavOrChrome(table)) continue;
       const rows = Array.from(table.querySelectorAll("tr"));
       if (rows.length < 4) continue;
 
@@ -803,14 +856,14 @@
         const rowControls = dedupeNestedControls(
           Array.from(
             tr.querySelectorAll('input[type="radio"], input[type="checkbox"], [role="radio"], button, [role="button"]')
-          ).filter((el) => !isHiddenElement(el))
+          ).filter((el) => !isEffectivelyHidden(el))
         );
 
         let tBtn = null;
         let fBtn = null;
 
         const rowTextBtns = Array.from(tr.querySelectorAll("button, label, td, span, div"))
-          .filter((el) => (el.children?.length || 0) <= 2 && !isHiddenElement(el));
+          .filter((el) => (el.children?.length || 0) <= 2 && !isEffectivelyHidden(el));
         const tTextEl = rowTextBtns.find((el) => /^(Đúng|Đ)$/i.test(getText(el).trim()));
         const fTextEl = rowTextBtns.find((el) => /^(Sai|S)$/i.test(getText(el).trim()));
 
@@ -862,7 +915,7 @@
       if (childLen > 0 && !((tag === "button" || tag === "label") && childLen <= 2)) return false;
       const txt = getFastText(el).trim();
       if (txt.length === 0 || txt.length > 6 || !/^(Đúng|Sai|Đ|S)$/i.test(txt)) return false;
-      if (isHiddenElement(el) || isInsideNavOrChrome(el)) return false;
+      if (isEffectivelyHidden(el) || isInsideNavOrChrome(el)) return false;
       if (closestMatching(el, (n) => /^(thead|th)$/i.test(n.tagName || ""))) return false;
       const r = getEffectiveRect(el);
       return r.width >= 12 && r.height >= 12 && r.width <= 220;
@@ -873,11 +926,11 @@
 
     if (tBtnsRaw.length >= 4 && fBtnsRaw.length >= 4) {
       const usedF = new Set();
-      const pairs = [];
+      let pairs = [];
       for (const tEl of tBtnsRaw) {
         const tr = getEffectiveRect(tEl);
         let bestF = null;
-        let bestDy = 28;
+        let bestDy = 48;
         for (const fEl of fBtnsRaw) {
           if (usedF.has(fEl)) continue;
           const dy = Math.abs(getEffectiveRect(fEl).top - tr.top);
@@ -893,6 +946,43 @@
             trueBtn: getInteractiveTarget(tEl),
             falseBtn: getInteractiveTarget(bestF)
           });
+        }
+      }
+
+      // Fallback xếp dọc trên mobile (nút Đúng nằm phía trên nút Sai trong cùng thẻ mệnh đề)
+      if (pairs.length < 4) {
+        const stackedUsedF = new Set();
+        const stackedPairs = [];
+        const allRaw = [...tBtnsRaw, ...fBtnsRaw];
+        for (const tEl of tBtnsRaw) {
+          const tr = getEffectiveRect(tEl);
+          let bestF = null;
+          let bestDist = Infinity;
+          for (const fEl of fBtnsRaw) {
+            if (stackedUsedF.has(fEl)) continue;
+            const lca = findLCA(tEl, fEl);
+            const lcaTag = (lca?.tagName || "").toLowerCase();
+            if (!lca || lcaTag === "body" || lcaTag === "html") continue;
+            const others = allRaw.filter((x) => x !== tEl && x !== fEl);
+            if (containsAny(lca, others)) continue;
+            const fr = getEffectiveRect(fEl);
+            const dist = Math.hypot((fr.left - tr.left), (fr.top - tr.top));
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestF = fEl;
+            }
+          }
+          if (bestF) {
+            stackedUsedF.add(bestF);
+            stackedPairs.push({
+              top: tr.top,
+              trueBtn: getInteractiveTarget(tEl),
+              falseBtn: getInteractiveTarget(bestF)
+            });
+          }
+        }
+        if (stackedPairs.length >= 4) {
+          pairs = stackedPairs;
         }
       }
 
@@ -932,7 +1022,7 @@
       Array.from(
         root.querySelectorAll?.('input[type="radio"], [role="radio"], .ant-radio, .mat-radio-button') || []
       ).filter((e) => {
-        if (isInsideNavOrChrome(e) || isHiddenElement(e)) return false;
+        if (isEffectivelyHidden(e) || isInsideNavOrChrome(e)) return false;
         const r = getEffectiveRect(e);
         return r.width > 0 && r.height > 0;
       })
@@ -1098,6 +1188,7 @@
       return null;
     }
 
+    const maxChoiceH = (globalScope.innerWidth || 1280) < 700 ? 760 : 420;
     for (let i = 0; i < 4; i++) {
       const rr = getEffectiveRect(rows[i]);
       const br = rects[i];
@@ -1110,7 +1201,7 @@
         else if (rowTxt.length > bTxt.length + 10) score -= 15;
       }
 
-      if (rr.height > 420) score -= 40;
+      if (rr.height > maxChoiceH) score -= 40;
       const qMatches = rowTxt.match(/Câu\s+\d+/gi);
       if (qMatches && qMatches.length >= 2) score -= 50;
     }
@@ -1143,19 +1234,25 @@
   }
 
   function findMCQ(root = document, _ignoreTop = true) {
-    // TẦNG 1: Lọc nhanh text A/B/C/D trước khi kiểm tra math/nav/hidden/rect
+    const vw = globalScope.innerWidth || 1280;
+    const isMobile = vw < 700;
+    const maxBadgeW = isMobile ? Math.max(150, Math.round(vw * 0.48)) : 120;
+    const maxBadgeH = isMobile ? 120 : 95;
+    const maxChoiceH = isMobile ? 760 : 420;
+
+    // TẦNG 1: Lọc nhanh text A/B/C/D trước khi kiểm tra math/hidden/nav/rect
     const map = { A: [], B: [], C: [], D: [] };
     const nodes = root.querySelectorAll?.("span, div, b, strong, label, button, p") || [];
 
     for (const el of nodes) {
-      if (el.children && el.children.length > 2) continue;
+      if (el.children && el.children.length > 3) continue;
       const raw = getFastText(el).trim();
       if (raw.length === 0 || raw.length > 5) continue;
       const m = raw.match(/^\(?([A-D])\)?[\.\)\:]?$/);
       if (!m) continue;
-      if (isInsideMathContainer(el) || isHiddenElement(el) || isInsideNavOrChrome(el)) continue;
+      if (isInsideMathContainer(el) || isEffectivelyHidden(el) || isInsideNavOrChrome(el)) continue;
       const r = getEffectiveRect(el);
-      if (r.width < 6 || r.height < 10 || r.width > 115 || r.height > 90) {
+      if (r.width < 6 || r.height < 10 || r.width > maxBadgeW || r.height > maxBadgeH) {
         continue;
       }
       map[m[1]].push(el);
@@ -1205,16 +1302,17 @@
       if (bestChoiceSet && bestChoiceSet.length === 4) return bestChoiceSet;
     }
 
-    // TẦNG 2: Khối đáp án viết liền "A. Nội dung" — lọc text prefix trước khi kiểm tra layout
+    // TẦNG 2: Khối đáp án viết liền "A. Nội dung" hoặc <span>A.</span><span>Nội dung</span>
     const inlineOptMap = { A: [], B: [], C: [], D: [] };
-    const INLINE_OPT_RE = /^\(?([A-D])\)?[\.\)\:]\s+\S/;
+    const INLINE_OPT_RE = /^\(?([A-D])\)?[\.\)\:]\s*\S/;
     const rowCandidates = Array.from(root.querySelectorAll?.("div, label, li, button, p, td, span") || []);
     const matchedInline = rowCandidates.filter((el) => {
       const txt = getFastText(el).trim();
       if (txt.length < 3 || txt.length > 1200 || !INLINE_OPT_RE.test(txt)) return false;
-      if (isHiddenElement(el) || isInsideNavOrChrome(el)) return false;
+      if (/^[A-D]\.[A-Z]\.?$/i.test(txt)) return false;
+      if (isEffectivelyHidden(el) || isInsideNavOrChrome(el)) return false;
       const r = getEffectiveRect(el);
-      return r.width >= 20 && r.height >= 12 && r.height <= 420;
+      return r.width >= 20 && r.height >= 12 && r.height <= maxChoiceH;
     });
 
     const leafInline = matchedInline.filter(
@@ -1252,7 +1350,7 @@
     const radios4 = dedupeNestedControls(
       Array.from(root.querySelectorAll?.('input[type="radio"], [role="radio"], .ant-radio, .mat-radio-button') || []).filter(
         (e) => {
-          if (isInsideNavOrChrome(e) || isHiddenElement(e)) return false;
+          if (isEffectivelyHidden(e) || isInsideNavOrChrome(e)) return false;
           const r = getEffectiveRect(e);
           return r.width > 0 && r.height > 0;
         }
@@ -1276,24 +1374,120 @@
       }));
     }
 
+    // TẦNG 4a: Nhãn A-D vẽ bằng CSS ::before { content: "A" }
+    if (typeof globalScope.getComputedStyle === "function") {
+      const pseudoMap = { A: [], B: [], C: [], D: [] };
+      const candidates4a =
+        root.querySelectorAll?.(
+          'button, label, li, div[role="button"], div[class*="option"], div[class*="answer"], div[class*="choice"]'
+        ) || [];
+      let scanned4a = 0;
+      for (const el of candidates4a) {
+        if (++scanned4a > 120) break;
+        if (isEffectivelyHidden(el) || isInsideNavOrChrome(el)) continue;
+        let rawContent = "";
+        try {
+          const beforeCs = globalScope.getComputedStyle(el, "::before");
+          rawContent = String((beforeCs && beforeCs.content) || "")
+            .replace(/^["']|["']$/g, "")
+            .trim();
+        } catch (e) {}
+        const m = rawContent.match(/^\(?([A-D])\)?[\.\)\:]?$/);
+        if (!m) continue;
+        const r = getEffectiveRect(el);
+        if (r.width >= 20 && r.height >= 16 && r.height <= maxChoiceH) {
+          pseudoMap[m[1]].push(el);
+        }
+      }
+      if (pseudoMap.A.length && pseudoMap.B.length && pseudoMap.C.length && pseudoMap.D.length) {
+        const lim = (arr) => (arr.length <= 6 ? arr : [...arr.slice(0, 3), ...arr.slice(-3)]);
+        let bestPseudoSet = null;
+        let bestPseudoScore = -Infinity;
+        for (const rA of lim(pseudoMap.A)) {
+          for (const rB of lim(pseudoMap.B)) {
+            for (const rC of lim(pseudoMap.C)) {
+              for (const rD of lim(pseudoMap.D)) {
+                const rows = findDistinctRowEls([rA, rB, rC, rD], root);
+                const rects = rows.map(getEffectiveRect);
+                if (!isValidReadingOrder(rects)) continue;
+                const scored = scoreAndBuildMCQ([rA, rB, rC, rD], rows, rects, false, rowTextCache);
+                if (scored && scored.score > bestPseudoScore) {
+                  bestPseudoScore = scored.score;
+                  bestPseudoSet = scored.choices;
+                }
+              }
+            }
+          }
+        }
+        if (bestPseudoSet && bestPseudoSet.length === 4) return bestPseudoSet;
+      }
+    }
+
+    // TẦNG 4b: Khối danh sách đáp án ngữ nghĩa gồm đúng 4 lựa chọn không hiện chữ cái A-D
+    const container4bNodes =
+      root.querySelectorAll?.(
+        '[class*="answer-list"], [class*="choice-list"], [class*="option-list"], [class*="list-answer"], [class*="list-option"], [class*="answers"], [class*="options"]'
+      ) || [];
+    for (const cont of container4bNodes) {
+      if (isEffectivelyHidden(cont) || isInsideNavOrChrome(cont)) continue;
+      let directVisible = Array.from(cont.children || []).filter((ch) => {
+        if (isEffectivelyHidden(ch) || isInsideNavOrChrome(ch)) return false;
+        const r = getEffectiveRect(ch);
+        return r.width >= 60 && r.height >= 24 && r.height <= maxChoiceH;
+      });
+      if (directVisible.length !== 4) {
+        const innerBtns = Array.from(cont.querySelectorAll?.('button, [role="button"], label, li') || []).filter((ch) => {
+          if (isEffectivelyHidden(ch) || isInsideNavOrChrome(ch)) return false;
+          const r = getEffectiveRect(ch);
+          return r.width >= 60 && r.height >= 24 && r.height <= maxChoiceH;
+        });
+        directVisible = dedupeNestedControls(innerBtns);
+      }
+      if (directVisible.length === 4) {
+        const validContent = directVisible.every((ch) => {
+          const txt = getFastText(ch).trim();
+          return txt.length > 0 || Boolean(ch.querySelector?.("img, svg, canvas, .katex, math"));
+        });
+        if (!validContent) continue;
+        const sorted = directVisible.slice().sort((a, b) => {
+          const ra = getEffectiveRect(a);
+          const rb = getEffectiveRect(b);
+          if (Math.abs(ra.top - rb.top) > 24) return ra.top - rb.top;
+          return ra.left - rb.left;
+        });
+        const letters = ["A", "B", "C", "D"];
+        return sorted.map((rowEl, i) => ({
+          letter: letters[i],
+          badgeEl: rowEl,
+          rowEl,
+          text: sanitizeChoiceText(serializeAcademicDOM(rowEl), letters[i])
+        }));
+      }
+    }
+
     return [];
   }
 
   function findShort(root = document, _ignoreTop = true) {
     const inputs = Array.from(
-      root.querySelectorAll?.('input[type="text"], input[type="number"], input[type="tel"], input:not([type]), textarea') || []
+      root.querySelectorAll?.('input, textarea, [contenteditable="true"]') || []
     );
     return (
       inputs.find((el) => {
-        if (el.disabled || el.readOnly) return false;
-        const tp = String(el.type || "").toLowerCase();
-        if (["hidden", "checkbox", "radio", "submit", "button", "search"].includes(tp)) return false;
-        if (isInsideNavOrChrome(el) || isHiddenElement(el)) return false;
-        const r = safeRect(el);
+        if (el.disabled || el.readOnly || el.getAttribute?.("aria-disabled") === "true") return false;
+        const tag = (el.tagName || "").toLowerCase();
+        if (tag === "input") {
+          const tp = String(el.type || "").toLowerCase();
+          if (["hidden", "checkbox", "radio", "submit", "button", "search", "file", "password", "email"].includes(tp)) {
+            return false;
+          }
+        }
+        if (isEffectivelyHidden(el) || isInsideNavOrChrome(el)) return false;
         const ph = (el.placeholder || "").toLowerCase();
         const aria = (el.getAttribute?.("aria-label") || "").toLowerCase();
         if (/(tìm|search|mật khẩu|password|nhảy câu|số câu|ghi chú)/i.test(`${ph} ${aria}`)) return false;
         if (el.getAttribute?.("min") === "1" && el.getAttribute?.("max") === "150") return false;
+        const r = getEffectiveRect(el);
         return r.width >= 28 && r.height >= 16;
       }) || null
     );
@@ -1520,16 +1714,6 @@
     }
   }
 
-  function isTinyOrClippedVisual(el, w, h) {
-    if (!el) return false;
-    if (w > 0 && h > 0 && (w < 60 || h < 45)) return true;
-    const r = safeRect(el);
-    const vh = globalScope.innerHeight || 800;
-    if (r.height > 0 && (r.top < 42 && r.bottom > 0)) return true;
-    if (r.height > 0 && (r.bottom > vh - 42 && r.top < vh)) return true;
-    return false;
-  }
-
   function parseDataImageUrl(dataUrl) {
     const m = String(dataUrl || "").match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i);
     if (!m) return null;
@@ -1662,7 +1846,7 @@
         const rawSrc = d.src || d.el?.getAttribute?.("src") || d.el?.src || "";
         if (rawSrc.startsWith("data:image/")) {
           const parsed = parseDataImageUrl(rawSrc);
-          if (parsed && !isTinyOrClippedVisual(d.el, d.w, d.h)) {
+          if (parsed) {
             inlineImages.push({
               id: d.id,
               label: d.label,
@@ -1673,7 +1857,7 @@
           }
         }
         const absUrl = resolveAbsoluteUrl(rawSrc);
-        if (/^https?:\/\//i.test(absUrl) && !isTinyOrClippedVisual(d.el, d.w, d.h)) {
+        if (/^https?:\/\//i.test(absUrl)) {
           remoteUrls.push({ id: d.id, label: d.label, url: absUrl });
           continue;
         }
@@ -1842,7 +2026,8 @@
 
   function detectUIAns(type, mcq, shortInp, tf) {
     if (type === "SHORT_ANSWER" && shortInp) {
-      const raw = (shortInp.value || "").trim();
+      const isCE = shortInp.isContentEditable || shortInp.getAttribute?.("contenteditable") === "true";
+      const raw = (isCE ? getFastText(shortInp) : shortInp.value || "").trim();
       if (!raw) return "";
       if (/^-?\d+([.,]\d+)?$/.test(raw)) return raw.replace(".", ",");
       return raw;
@@ -1944,7 +2129,7 @@
       }
 
       if (m) {
-        if (isHiddenElement(el) || isInsideNavOrChrome(el)) continue;
+        if (isEffectivelyHidden(el) || isInsideNavOrChrome(el)) continue;
         const r = getEffectiveRect(el);
         if (r.width === 0 || r.height === 0) continue;
         const n = parseInt(m[1], 10);
@@ -1981,12 +2166,50 @@
     });
   }
 
+  function inspectDomSummary(root = globalScope.document) {
+    const out = {
+      vw: globalScope.innerWidth || 0,
+      vh: globalScope.innerHeight || 0,
+      tables: 0,
+      radios: 0,
+      inputs: 0,
+      iframes: 0,
+      mcqLetters: { A: 0, B: 0, C: 0, D: 0 },
+      tfTrue: 0,
+      tfFalse: 0,
+      multiBlocks: 0
+    };
+    if (!root || typeof root.querySelectorAll !== "function") return out;
+    try {
+      out.tables = root.querySelectorAll("table").length;
+      out.radios = root.querySelectorAll('input[type="radio"], [role="radio"], .ant-radio, .mat-radio-button').length;
+      out.inputs = root.querySelectorAll('input, textarea, [contenteditable="true"]').length;
+      out.iframes = root.querySelectorAll("iframe").length;
+      for (const el of root.querySelectorAll("span, div, b, strong, label, button, p")) {
+        if ((el.children?.length || 0) > 3) continue;
+        const t = getFastText(el).trim();
+        if (t.length === 0 || t.length > 6) continue;
+        const mMcq = t.match(/^\(?([A-D])\)?[\.\)\:]?$/);
+        if (mMcq && !isInsideMathContainer(el)) {
+          out.mcqLetters[mMcq[1]] += 1;
+        } else if (/^(Đúng|Đ)$/i.test(t)) {
+          out.tfTrue += 1;
+        } else if (/^(Sai|S)$/i.test(t)) {
+          out.tfFalse += 1;
+        }
+      }
+      out.multiBlocks = getMultiBlocks(root).length;
+    } catch (e) {}
+    return out;
+  }
+
   const api = {
     beginScanCache,
     endScanCache,
     mathMLToLatex,
     serializeAcademicDOM,
     getEffectiveRect,
+    isEffectivelyHidden,
     dedupeNestedControls,
     isNavPanelContainer,
     isInsideNavOrChrome,
@@ -2001,6 +2224,7 @@
     collectScrollFallbackZones,
     detectUIAns,
     sanitizeChoiceText,
+    inspectDomSummary,
     DEFAULT_BG_SET
   };
 

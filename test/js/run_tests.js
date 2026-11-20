@@ -834,6 +834,302 @@ test("21. Benchmark hiệu năng DOM nặng 2000 node (mobile 390px + KaTeX + Dr
   console.log(`    [Benchmark 2000 nodes: ${elapsedMs}ms, detectRectCalls=${detectRectCalls}, detectCsCalls=${detectCsCalls}]`);
 });
 
+test("22. Mobile full-screen fixed quiz shell không bị nhận nhầm là Nav & ẩn tổ tiên display:none được lọc sạch", () => {
+  const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  const { EXT } = loadModulesInEnv(env);
+
+  // Vỏ đề fixed full màn hình trên mobile
+  const fixedShell = el(doc, "div", {
+    className: "exam-player-shell",
+    cs: { position: "fixed" },
+    rect: { top: 0, left: 0, width: 390, height: 844 }
+  });
+  assert.strictEqual(EXT.isNavPanelContainer(fixedShell), false);
+
+  // Modal đáp án ẩn tổ tiên (display: none trên cha, node con vẫn có rect)
+  const hiddenParent = el(doc, "div", { style: { display: "none" }, rect: { top: 0, left: 0, width: 360, height: 300 } });
+  ["A", "B", "C", "D"].forEach((L, i) => {
+    hiddenParent.appendChild(
+      el(doc, "div", { rect: { top: 100 + i * 40, left: 20, width: 300, height: 32 } }, [
+        el(doc, "span", { text: L, rect: { top: 100 + i * 40, left: 20, width: 24, height: 24 } }),
+        el(doc, "span", { text: `Bị ẩn ${L}`, rect: { top: 100 + i * 40, left: 50, width: 200, height: 24 } })
+      ])
+    );
+  });
+  fixedShell.appendChild(hiddenParent);
+
+  const visibleOpts = el(doc, "div", { rect: { top: 160, left: 10, width: 360, height: 240 } });
+  ["A", "B", "C", "D"].forEach((L, i) => {
+    const y = 170 + i * 50;
+    visibleOpts.appendChild(
+      el(doc, "div", { rect: { top: y, left: 10, width: 350, height: 42 } }, [
+        el(doc, "span", { text: L, rect: { top: y, left: 14, width: 24, height: 24 } }),
+        el(doc, "span", { text: `Đáp án thật ${L}`, rect: { top: y, left: 46, width: 280, height: 28 } })
+      ])
+    );
+  });
+  fixedShell.appendChild(visibleOpts);
+  doc.body.appendChild(fixedShell);
+
+  const cls = EXT.classifyQuestionInScope(doc, true);
+  assert.strictEqual(cls.type, "MCQ");
+  assert.strictEqual(cls.mcq[0].text, "Đáp án thật A");
+});
+
+test("23. MCQ mobile: đáp án cao 520px, thẻ tách 'A.Nội dung', badge rộng 2x2 (165px), Tier 4 ::before & container ngữ nghĩa", () => {
+  // 23a: Hàng cao 520px + thẻ tách không dấu cách "A.Nội dung"
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const { EXT } = loadModulesInEnv(env);
+    const list = el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 2200 } });
+    ["A", "B", "C", "D"].forEach((L, i) => {
+      const y = 90 + i * 540;
+      list.appendChild(
+        el(doc, "div", { rect: { top: y, left: 10, width: 360, height: 520 } }, [
+          el(doc, "span", { text: `${L}.` }),
+          el(doc, "span", { text: `Nội dung dài ${L}` })
+        ])
+      );
+    });
+    doc.body.appendChild(list);
+    const cls = EXT.classifyQuestionInScope(doc, true);
+    assert.strictEqual(cls.type, "MCQ");
+    assert.strictEqual(cls.mcq[3].text, "Nội dung dài D");
+  }
+
+  // 23b: Badge A-D lưới 2x2 rộng 165px trên mobile
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const { EXT } = loadModulesInEnv(env);
+    const grid = el(doc, "div", { rect: { top: 200, left: 10, width: 370, height: 240 } });
+    const coords = [
+      [200, 12],
+      [200, 195],
+      [300, 12],
+      [300, 195]
+    ];
+    ["A", "B", "C", "D"].forEach((L, i) => {
+      const [y, x] = coords[i];
+      grid.appendChild(
+        el(doc, "div", { rect: { top: y, left: x, width: 170, height: 80 } }, [
+          el(doc, "button", { text: L, rect: { top: y, left: x, width: 165, height: 42 } }),
+          el(doc, "div", { text: `Lưới ${L}`, rect: { top: y + 44, left: x, width: 165, height: 28 } })
+        ])
+      );
+    });
+    doc.body.appendChild(grid);
+    const cls = EXT.classifyQuestionInScope(doc, true);
+    assert.strictEqual(cls.type, "MCQ");
+    assert.strictEqual(cls.mcq[1].text, "Lưới B");
+  }
+
+  // 23c: Tier 4a CSS ::before badge A-D
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const { EXT } = loadModulesInEnv(env);
+    const box = el(doc, "div", { rect: { top: 100, left: 10, width: 370, height: 300 } });
+    ["A", "B", "C", "D"].forEach((L, i) => {
+      box.appendChild(
+        el(doc, "div", {
+          className: "option-item",
+          pseudo: { "::before": { content: `"${L}."` } },
+          text: `Pseudo ${L}`,
+          rect: { top: 120 + i * 50, left: 12, width: 350, height: 42 }
+        })
+      );
+    });
+    doc.body.appendChild(box);
+    const cls = EXT.classifyQuestionInScope(doc, true);
+    assert.strictEqual(cls.type, "MCQ");
+    assert.strictEqual(cls.mcq[2].text, "Pseudo C");
+  }
+
+  // 23d: Tier 4b container ngữ nghĩa 4 lựa chọn không hiện chữ A-D
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const { EXT } = loadModulesInEnv(env);
+    const box = el(doc, "div", { className: "answer-list", rect: { top: 120, left: 10, width: 370, height: 260 } }, [
+      el(doc, "div", { text: "Phương án một", rect: { top: 130, left: 12, width: 350, height: 48 } }),
+      el(doc, "div", { text: "Phương án hai", rect: { top: 188, left: 12, width: 350, height: 48 } }),
+      el(doc, "div", { text: "Phương án ba", rect: { top: 246, left: 12, width: 350, height: 48 } }),
+      el(doc, "div", { text: "Phương án bốn", rect: { top: 304, left: 12, width: 350, height: 48 } })
+    ]);
+    doc.body.appendChild(box);
+    const cls = EXT.classifyQuestionInScope(doc, true);
+    assert.strictEqual(cls.type, "MCQ");
+    assert.strictEqual(cls.mcq[0].letter, "A");
+    assert.strictEqual(cls.mcq[3].text, "Phương án bốn");
+  }
+});
+
+test("24. Mobile Đúng/Sai thẻ xếp dọc (Đúng trên Sai) & Short Answer contenteditable=true", async () => {
+  // Đúng/Sai xếp dọc theo card trên mobile
+  const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  const { EXT } = loadModulesInEnv(env);
+  const wrap = el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 680 } });
+  for (let i = 0; i < 4; i++) {
+    const baseY = 90 + i * 160;
+    wrap.appendChild(
+      el(doc, "div", { rect: { top: baseY, left: 10, width: 360, height: 145 } }, [
+        el(doc, "div", { text: `${String.fromCharCode(97 + i)}) Phát biểu dọc ${i + 1}`, rect: { top: baseY, left: 12, width: 340, height: 32 } }),
+        el(doc, "button", { text: "Đúng", rect: { top: baseY + 40, left: 12, width: 160, height: 40 } }),
+        el(doc, "button", { text: "Sai", rect: { top: baseY + 95, left: 12, width: 160, height: 40 } })
+      ])
+    );
+  }
+  doc.body.appendChild(wrap);
+  const tfCls = EXT.classifyQuestionInScope(doc, true);
+  assert.strictEqual(tfCls.type, "TRUE_FALSE");
+  assert.strictEqual(tfCls.tf.trueBtns.length, 4);
+  assert.ok(tfCls.tf.statements[2].includes("Phát biểu dọc 3"));
+
+  // Short Answer dùng contenteditable="true"
+  const ceEnv = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  const ceLoaded = loadModulesInEnv(ceEnv.env, async () => null);
+  const ceBox = el(ceEnv.doc, "div", { attrs: { contenteditable: "true" }, rect: { top: 200, left: 20, width: 220, height: 44 } });
+  ceEnv.doc.body.appendChild(el(ceEnv.doc, "div", { rect: { top: 90, left: 10, width: 360, height: 220 } }, [
+    el(ceEnv.doc, "p", { text: "Nhập kết quả:" }),
+    ceBox
+  ]));
+  const ceCls = ceLoaded.EXT.classifyQuestionInScope(ceEnv.doc, true);
+  assert.strictEqual(ceCls.type, "SHORT_ANSWER");
+  assert.strictEqual(ceCls.shortInp, ceBox);
+
+  await new Promise((resolve) => {
+    ceLoaded.AGENT._internalForTest.applyAnswerToDOM("SHORT_ANSWER", "12,5", "NUMBER", [], ceBox, null, resolve);
+  });
+  assert.strictEqual(ceLoaded.EXT.detectUIAns("SHORT_ANSWER", null, ceBox, null), "12,5");
+});
+
+test("25. Agent: bỏ qua text ẩn/script trong body, nhận URL /home-student/practice, đồng bộ flutterInAppWebViewPlatformReady & reset SPA route", async () => {
+  const listeners = new Map();
+  const { doc, env } = createTestEnvironment({
+    innerWidth: 390,
+    innerHeight: 844,
+    url: "https://app.onluyen.vn/home-student/practice/999?from=home-student"
+  });
+  env.MutationObserver = class {
+    observe() {}
+    disconnect() {}
+  };
+  env.addEventListener = (type, fn) => {
+    if (!listeners.has(type)) listeners.set(type, []);
+    listeners.get(type).push(fn);
+  };
+  env.removeEventListener = (type, fn) => {
+    const arr = listeners.get(type) || [];
+    listeners.set(type, arr.filter((x) => x !== fn));
+  };
+
+  let getConfigCalls = 0;
+  let enabledConfigReady = false;
+  const solvedRequests = [];
+  const { AGENT } = loadModulesInEnv(env, async (handler, args) => {
+    if (handler === "getConfig") {
+      getConfigCalls += 1;
+      if (!enabledConfigReady) return null;
+      return { autoSolverEnabled: true, autoAdvanceEnabled: false, intelligenceMode: "smart" };
+    }
+    if (handler === "solveQuiz") {
+      solvedRequests.push(args);
+      return { success: true, result: { normalizedAns: "A", confidence: 94 } };
+    }
+    return null;
+  });
+
+  // Giả lập HTML ẩn / <script> có chữ "Tổng điểm Đáp án của bạn" nhưng chữ hiển thị (innerText) là đề thi thật
+  doc.body.appendChild(el(doc, "script", { text: "Tổng điểm Đáp án của bạn" }));
+  doc.body.appendChild(
+    el(doc, "div", { rect: { top: 100, left: 10, width: 370, height: 340 } }, [
+      el(doc, "p", { text: "Câu 1: Thủ đô của Pháp?" }),
+      el(doc, "button", { text: "A. Paris", rect: { top: 160, left: 10, width: 340, height: 42 } }),
+      el(doc, "button", { text: "B. Lyon", rect: { top: 210, left: 10, width: 340, height: 42 } }),
+      el(doc, "button", { text: "C. Nice", rect: { top: 260, left: 10, width: 340, height: 42 } }),
+      el(doc, "button", { text: "D. Marseille", rect: { top: 310, left: 10, width: 340, height: 42 } })
+    ])
+  );
+  doc.body._innerText = "Câu 1: Thủ đô của Pháp?\nA. Paris\nB. Lyon\nC. Nice\nD. Marseille";
+
+  // Ban đầu bridge trả null, sau khi flutterInAppWebViewPlatformReady bắn -> syncConfigFromNative bật lên và tự giải
+  assert.strictEqual(getConfigCalls >= 1, true);
+  enabledConfigReady = true;
+  for (const fn of listeners.get("flutterInAppWebViewPlatformReady") || []) {
+    await fn();
+  }
+  await new Promise((r) => setTimeout(r, 120));
+
+  const diag = AGENT.getDiagnostics();
+  AGENT.cleanup();
+  assert.strictEqual(diag.configSynced, true);
+  assert.strictEqual(diag.isQuiz, true);
+  assert.strictEqual(diag.dom.mcqLetters.A, 0); // viết liền "A. Paris" không bị đếm nhầm chữ đơn
+  assert.strictEqual(solvedRequests.length, 1);
+
+  // Kiểm tra đổi route SPA reset solvedSignature
+  const routeRes = AGENT.onRouteChanged("https://app.onluyen.vn/home-student/practice/1000");
+  assert.strictEqual(routeRes.changed, true);
+});
+
+test("26. Ảnh icon nhỏ không bật hasVisuals và ảnh đề remote bị cắt mép top=10 vẫn đi Lớp 1 cookie fetch", async () => {
+  let screenshotCalls = 0;
+  let fetchedItems = [];
+  const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  const { EXT, AGENT } = loadModulesInEnv(env, async (handler, args) => {
+    if (handler === "takeScreenshot") {
+      screenshotCalls += 1;
+      return { mimeType: "image/jpeg", data: "SHOULD_NOT_HAPPEN" };
+    }
+    if (handler === "fetchImagesWithCookies") {
+      fetchedItems = args.items || [];
+      return fetchedItems.map((it) => ({
+        id: it.id,
+        ok: true,
+        mimeType: "image/png",
+        data: "FULL_RES_REMOTE_PNG"
+      }));
+    }
+    return null;
+  });
+
+  // 26a: Câu chỉ có icon loa nhỏ 28x28 -> hasVisuals = false
+  const iconBox = el(doc, "div", { rect: { top: 80, left: 10, width: 360, height: 320 } }, [
+    el(doc, "p", {}, [
+      "Listen and choose ",
+      el(doc, "img", { src: "https://cdn.onluyen.vn/assets/audio-icon.png", width: 28, height: 28, rect: { top: 85, left: 120, width: 28, height: 28 } })
+    ]),
+    el(doc, "button", { text: "A. Cat", rect: { top: 140, left: 10, width: 340, height: 38 } }),
+    el(doc, "button", { text: "B. Dog", rect: { top: 185, left: 10, width: 340, height: 38 } }),
+    el(doc, "button", { text: "C. Bird", rect: { top: 230, left: 10, width: 340, height: 38 } }),
+    el(doc, "button", { text: "D. Fish", rect: { top: 275, left: 10, width: 340, height: 38 } })
+  ]);
+  doc.body.appendChild(iconBox);
+  const clsIcon = EXT.classifyQuestionInScope(doc, true);
+  const payloadIcon = EXT.extractQuestionPayload(doc, clsIcon);
+  assert.strictEqual(payloadIcon.hasVisuals, false);
+
+  // 26b: Ảnh đề bài 320x200 bị cuộn cắt ở top=10 -> vẫn đi Lớp 1 fetchImagesWithCookies, KHÔNG gọi takeScreenshot
+  doc.body.removeChild(iconBox);
+  const graphBox = el(doc, "div", { rect: { top: 5, left: 10, width: 360, height: 500 } }, [
+    el(doc, "p", {}, [
+      "Đồ thị:",
+      el(doc, "img", { src: "https://cdn.onluyen.vn/do-thi-ham-so.png", width: 320, height: 200, rect: { top: 10, left: 20, width: 320, height: 200 } })
+    ]),
+    el(doc, "button", { text: "A. 1", rect: { top: 240, left: 10, width: 340, height: 38 } }),
+    el(doc, "button", { text: "B. 2", rect: { top: 285, left: 10, width: 340, height: 38 } }),
+    el(doc, "button", { text: "C. 3", rect: { top: 330, left: 10, width: 340, height: 38 } }),
+    el(doc, "button", { text: "D. 4", rect: { top: 375, left: 10, width: 340, height: 38 } })
+  ]);
+  doc.body.appendChild(graphBox);
+  const clsGraph = EXT.classifyQuestionInScope(doc, true);
+  const payloadGraph = EXT.extractQuestionPayload(doc, clsGraph);
+  assert.strictEqual(payloadGraph.hasVisuals, true);
+  const imgs = await AGENT._internalForTest.prepareVisualAttachments(payloadGraph, clsGraph, false);
+  assert.strictEqual(fetchedItems.length, 1);
+  assert.strictEqual(imgs.length, 1);
+  assert.strictEqual(imgs[0].data, "FULL_RES_REMOTE_PNG");
+  assert.strictEqual(screenshotCalls, 0);
+});
+
 (async () => {
   let passed = 0;
   let failed = 0;

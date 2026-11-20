@@ -16,6 +16,12 @@
   let solvedSignature = "";
   let debounceTimer = null;
   let maxWaitTimer = null;
+  let retrySyncTimer1 = null;
+  let retrySyncTimer2 = null;
+  let platformReadyHandler = null;
+  let routeChangeHandler = null;
+  let configSynced = false;
+  let lastRouteKey = normalizeRouteKey();
   let isExtensionEnabled = false;
   let autoAdvanceEnabled = true;
   let intelligenceMode = "smart";
@@ -31,6 +37,26 @@
   const failCountMap = new Map();
   const attemptedSingleQuestions = new Set();
   const rejectedHistoryMap = new Map();
+
+  function normalizeRouteKey(rawUrl = "") {
+    if (typeof rawUrl === "string" && rawUrl) {
+      try {
+        const u = new URL(rawUrl, globalScope.location?.href || "https://app.onluyen.vn/");
+        return ((u.pathname || "") + (u.hash || "")).toLowerCase();
+      } catch (e) {
+        return rawUrl.split("?")[0].toLowerCase();
+      }
+    }
+    const loc = globalScope.location || {};
+    return ((loc.pathname || "") + (loc.hash || "")).toLowerCase();
+  }
+
+  function getVisibleBodyText(scopeDoc = globalScope.document) {
+    const body = scopeDoc?.body;
+    if (!body) return "";
+    if (typeof body.innerText === "string") return body.innerText;
+    return body.textContent || "";
+  }
 
   function waitMs(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -210,21 +236,30 @@
   function isQuizPage(scopeDoc = globalScope.document, preDetectedType = undefined) {
     if (!scopeDoc || !scopeDoc.body) return false;
     const loc = globalScope.location || { pathname: "", hash: "", search: "" };
-    const fullUrl = ((loc.pathname || "") + (loc.hash || "") + (loc.search || "")).toLowerCase();
+    const routePath = ((loc.pathname || "") + (loc.hash || "")).toLowerCase();
+    const routeOnly = routePath.split("?")[0];
+    const searchLower = (loc.search || "").toLowerCase();
 
-    if (/(\/|^)(home-student|login|sign-in|dashboard|profile|ranking)(\/|\?|#|$)/i.test(fullUrl)) {
+    if (/(\/|^)(login|sign-in|signin|auth|register|forgot-password)(\/|\?|#|$)/i.test(routePath)) {
       return false;
     }
 
-    const txt = scopeDoc.body.textContent || scopeDoc.body.innerText || "";
-    if (fullUrl.includes("result")) return false;
+    const txt = getVisibleBodyText(scopeDoc);
+    if (routePath.includes("result")) return false;
     if (/Kết quả chi tiết|Số câu đúng|Tổng điểm/i.test(txt) && /Đáp án của bạn/i.test(txt)) {
       if (!findContinueButton(scopeDoc)) return false;
     }
 
+    if (!preDetectedType && /(^|\/)(home-student|dashboard|profile|ranking)\/?$/i.test(routeOnly)) {
+      return false;
+    }
+    if (preDetectedType) {
+      return true;
+    }
+
     if (
-      /(practice|exam|test|step|assignment|docx|homework|bai-tap|kiem-tra|luyen-tap|de-thi|quiz|contest|arena|study|learn)/.test(
-        fullUrl
+      /(practice|exam|test|step|assignment|docx|homework|bai-tap|kiem-tra|luyen-tap|de-thi|quiz|contest|arena|study|learn|doing|do-exam|do-test|adaptive|self-study|student\/(exam|practice|test|assignment))/.test(
+        routePath + searchLower
       )
     ) {
       return true;
@@ -232,15 +267,15 @@
     if (/#\d{5,}/.test(txt) || /(?:Câu(?:\s+hỏi)?|Question)\s+\d+/i.test(txt) || /Nộp bài|Phiếu trả lời/i.test(txt)) {
       return true;
     }
-    if (preDetectedType !== undefined) {
-      return preDetectedType !== null;
+    if (preDetectedType === undefined) {
+      return EXT.classifyQuestionInScope(scopeDoc, true).type !== null;
     }
-    return EXT.classifyQuestionInScope(scopeDoc, true).type !== null;
+    return false;
   }
 
   function dismissSubmitModal() {
     const doc = globalScope.document;
-    const bodyTxt = doc?.body?.innerText || doc?.body?.textContent || "";
+    const bodyTxt = getVisibleBodyText(doc);
     if (/chắc chắn muốn nộp bài|xác nhận nộp bài|kết thúc bài làm|nộp bài thi/i.test(bodyTxt)) {
       const cancelBtn = Array.from(doc.querySelectorAll?.("button, [role='button'], div, span") || []).find((el) => {
         const t = (el.innerText || el.textContent || "").trim().toUpperCase();
@@ -282,26 +317,35 @@
     const isTextMode = answerKind === "TEXT" || /[A-Za-zÀ-ỹ]/.test(rawStr);
     const val = isTextMode ? rawStr.replace(/\s+/g, " ").trim() : rawStr.replace(/\s+/g, "");
 
+    const isCE = Boolean(inputEl.isContentEditable || inputEl.getAttribute?.("contenteditable") === "true");
+
     const apply = (v) => {
       try {
         if (typeof inputEl.focus === "function") inputEl.focus();
-        const isTA = typeof globalScope.HTMLTextAreaElement === "function" && inputEl instanceof globalScope.HTMLTextAreaElement;
-        const proto = isTA
-          ? globalScope.HTMLTextAreaElement?.prototype
-          : globalScope.HTMLInputElement?.prototype;
-        const nativeSetter = proto ? Object.getOwnPropertyDescriptor(proto, "value")?.set : null;
-        if (nativeSetter) {
-          nativeSetter.call(inputEl, v);
+        if (isCE) {
+          inputEl.textContent = v;
         } else {
-          inputEl.value = v;
+          const isTA = typeof globalScope.HTMLTextAreaElement === "function" && inputEl instanceof globalScope.HTMLTextAreaElement;
+          const proto = isTA
+            ? globalScope.HTMLTextAreaElement?.prototype
+            : globalScope.HTMLInputElement?.prototype;
+          const nativeSetter = proto ? Object.getOwnPropertyDescriptor(proto, "value")?.set : null;
+          if (nativeSetter) {
+            nativeSetter.call(inputEl, v);
+          } else {
+            inputEl.value = v;
+          }
         }
       } catch (err) {
-        inputEl.value = v;
+        if (isCE) inputEl.textContent = v;
+        else inputEl.value = v;
       }
 
       try {
         if (typeof globalScope.InputEvent === "function") {
           inputEl.dispatchEvent(new globalScope.InputEvent("input", { bubbles: true, inputType: "insertText", data: v }));
+        } else if (typeof globalScope.Event === "function") {
+          inputEl.dispatchEvent(new globalScope.Event("input", { bubbles: true }));
         }
         if (typeof globalScope.Event === "function") {
           inputEl.dispatchEvent(new globalScope.Event("change", { bubbles: true }));
@@ -316,7 +360,8 @@
 
     apply(val);
     setTimeout(() => {
-      if (!isTextMode && (!inputEl.value || !String(inputEl.value).trim())) {
+      const currentVal = isCE ? (inputEl.textContent || "") : (inputEl.value || "");
+      if (!isTextMode && (!currentVal || !String(currentVal).trim())) {
         const altVal = val.includes(",") ? val.replace(",", ".") : val.replace(".", ",");
         apply(altVal);
       }
@@ -688,7 +733,7 @@
       const { type, shortInp, tf, mcq } = classified;
       const payload = EXT.extractQuestionPayload(activeDoc, classified);
       const oldUiAns = EXT.detectUIAns(type, mcq, shortInp, tf);
-      const bodyTxt = activeDoc.body?.innerText || activeDoc.body?.textContent || "";
+      const bodyTxt = getVisibleBodyText(activeDoc);
       const qCode = (bodyTxt.match(/#\d{5,}/) || [])[0] || (targetQNum ? `Câu ${targetQNum}` : "Câu hiện tại");
       const cleanQuestionFull = payload.extraDetails ? `${payload.stemText}\n${payload.extraDetails}` : payload.stemText;
       const curSig = `${qCode}_${type}_${payload.stemText.slice(0, 80)}_${payload.visualSignature.slice(0, 40)}`;
@@ -943,7 +988,7 @@
       }
 
       const doc = globalScope.document;
-      const snap = (doc.body?.textContent || doc.body?.innerText || "").slice(0, 350);
+      const snap = getVisibleBodyText(doc).slice(0, 350);
 
       const actionBtn = findFastNextActionButton(doc, true);
       if (actionBtn) {
@@ -968,7 +1013,7 @@
           isProcessing = false;
           return;
         }
-        const nowSnap = (doc.body?.textContent || doc.body?.innerText || "").slice(0, 350);
+        const nowSnap = getVisibleBodyText(doc).slice(0, 350);
         if (nowSnap !== snap) {
           changed = true;
           break;
@@ -995,7 +1040,7 @@
     }, 120);
   }
 
-  async function processScreen(forceDiagnostic = false) {
+  function processScreen(forceDiagnostic = false) {
     if (!isExtensionEnabled) return { reason: "disabled" };
     if (isProcessing && !forceDiagnostic) return { reason: "busy" };
 
@@ -1003,11 +1048,15 @@
     const hasAnyDetected = blocks.length >= 2 || Boolean(classified.type);
     if (!scopeDoc || !isQuizPage(scopeDoc, hasAnyDetected ? (classified.type || "LIST") : null)) {
       if (forceDiagnostic) syncStatus("ℹ️ Trang hiện tại không phải giao diện làm bài.");
-      return { reason: "not_quiz_page", url: globalScope.location?.href || "" };
+      return {
+        reason: "not_quiz_page",
+        url: globalScope.location?.href || "",
+        diag: forceDiagnostic ? EXT.inspectDomSummary?.(scopeDoc || globalScope.document) : undefined
+      };
     }
     if (dismissSubmitModal()) return { reason: "submit_modal_dismissed" };
 
-    const bodyTxt = scopeDoc.body?.textContent || scopeDoc.body?.innerText || "";
+    const bodyTxt = getVisibleBodyText(scopeDoc);
     if (bodyTxt.includes("Tạm dừng") && bodyTxt.includes("Bạn có muốn tiếp tục")) {
       const resumeBtn = Array.from(scopeDoc.querySelectorAll?.("button, [role='button'], div") || []).find(
         (b) => (b.textContent || "").trim() === "Tiếp tục"
@@ -1041,7 +1090,11 @@
         lastWaitingStatusAt = now;
         syncStatus("🔍 Đang chờ câu hỏi hiển thị trên trang...");
       }
-      return { reason: "no_question_detected", url: globalScope.location?.href || "" };
+      return {
+        reason: "no_question_detected",
+        url: globalScope.location?.href || "",
+        diag: forceDiagnostic ? EXT.inspectDomSummary?.(scopeDoc) : undefined
+      };
     }
 
     const { type, shortInp, tf, mcq } = classified;
@@ -1072,73 +1125,116 @@
     solvedSignature = curSig;
     syncStatus(`🧠 Đang giải ${qCode} (${type})...`);
 
-    await waitMs(40);
-    const images = await prepareVisualAttachments(payload, classified, false);
-    const res = await requestNativeSolve({
-      questionType: type,
-      qCode,
-      rawScreenText: payload.stemText,
-      contextPassage: payload.contextPassage,
-      extraDetails: payload.extraDetails,
-      hasVisuals: payload.hasVisuals || images.length > 0,
-      hasUnderline: payload.hasUnderline,
-      hasTable: payload.hasTable,
-      visualSignature: payload.visualSignature,
-      images,
-      intelligenceMode
-    });
+    (async () => {
+      try {
+        await waitMs(40);
+        const images = await prepareVisualAttachments(payload, classified, false);
+        const res = await requestNativeSolve({
+          questionType: type,
+          qCode,
+          rawScreenText: payload.stemText,
+          contextPassage: payload.contextPassage,
+          extraDetails: payload.extraDetails,
+          hasVisuals: payload.hasVisuals || images.length > 0,
+          hasUnderline: payload.hasUnderline,
+          hasTable: payload.hasTable,
+          visualSignature: payload.visualSignature,
+          images,
+          intelligenceMode
+        });
 
-    clearProcessingWatchdog();
-    if (!res?.success || !res.result) {
-      const fails = (failCountMap.get(curSig) || 0) + 1;
-      failCountMap.set(curSig, fails);
-      if (fails >= 3) {
+        clearProcessingWatchdog();
+        if (!res?.success || !res.result) {
+          const fails = (failCountMap.get(curSig) || 0) + 1;
+          failCountMap.set(curSig, fails);
+          if (fails >= 3) {
+            isProcessing = false;
+            syncStatus("⚠️ Câu này lỗi 3 lần (kiểm tra API Key / bấm 🔍 Quét ngay hoặc chuyển câu kế)");
+          } else {
+            syncStatus(`⚠️ Lỗi tạm thời (lần ${fails}/3), tự thử lại sau 5s...`);
+            setTimeout(() => {
+              solvedSignature = "";
+              isProcessing = false;
+            }, 5000);
+          }
+          return;
+        }
+
+        failCountMap.delete(curSig);
+        const r = res.result;
+        const normAns = r.normalizedAns || "";
+        const cleanExportAns = formatCleanAnswerForExport(type, normAns, mcq);
+
+        saveCleanExportItem({
+          signature: curSig,
+          qLabel: qCode,
+          question: cleanQuestionFull,
+          answer: cleanExportAns,
+          step: r.step || "",
+          subject: r.subject || "",
+          confidence: r.confidence ?? 90,
+          verifiedTwoPass: Boolean(r.verifiedTwoPass),
+          verifiedThreeAgent: Boolean(r.verifiedThreeAgent),
+          auditNote: r.auditNote || "",
+          modelUsed: r.modelUsed || ""
+        });
+
+        syncStatus(
+          autoAdvanceEnabled ? `Đã giải ${qCode}` : `✅ Đã tích ${qCode} (Chờ bấm Tiếp)`,
+          `${qCode}: ${cleanExportAns}`,
+          buildMetaFromResult(qCode, r)
+        );
+
+        applyAnswerToDOM(type, normAns, r.answerKind, mcq, shortInp, tf, () => {
+          if (autoAdvanceEnabled) {
+            advanceSingleStep(curSig);
+          } else {
+            isProcessing = false;
+          }
+        });
+      } catch (err) {
+        clearProcessingWatchdog();
         isProcessing = false;
-        syncStatus("⚠️ Câu này lỗi 3 lần (kiểm tra API Key / bấm 🔍 Quét ngay hoặc chuyển câu kế)");
-      } else {
-        syncStatus(`⚠️ Lỗi tạm thời (lần ${fails}/3), tự thử lại sau 5s...`);
-        setTimeout(() => {
-          solvedSignature = "";
-          isProcessing = false;
-        }, 5000);
+        syncStatus(`⚠️ Lỗi xử lý ${qCode}: ${err?.message || err}`);
       }
-      return { reason: "solve_error", qCode, error: res?.error || "" };
-    }
-
-    failCountMap.delete(curSig);
-    const r = res.result;
-    const normAns = r.normalizedAns || "";
-    const cleanExportAns = formatCleanAnswerForExport(type, normAns, mcq);
-
-    saveCleanExportItem({
-      signature: curSig,
-      qLabel: qCode,
-      question: cleanQuestionFull,
-      answer: cleanExportAns,
-      step: r.step || "",
-      subject: r.subject || "",
-      confidence: r.confidence ?? 90,
-      verifiedTwoPass: Boolean(r.verifiedTwoPass),
-      verifiedThreeAgent: Boolean(r.verifiedThreeAgent),
-      auditNote: r.auditNote || "",
-      modelUsed: r.modelUsed || ""
-    });
-
-    syncStatus(
-      autoAdvanceEnabled ? `Đã giải ${qCode}` : `✅ Đã tích ${qCode} (Chờ bấm Tiếp)`,
-      `${qCode}: ${cleanExportAns}`,
-      buildMetaFromResult(qCode, r)
-    );
-
-    applyAnswerToDOM(type, normAns, r.answerKind, mcq, shortInp, tf, () => {
-      if (autoAdvanceEnabled) {
-        advanceSingleStep(curSig);
-      } else {
-        isProcessing = false;
-      }
-    });
+    })();
 
     return { reason: "solving_started", qCode, type };
+  }
+
+  async function syncConfigFromNative() {
+    const cfg = await callNative("getConfig", {});
+    if (cfg && typeof cfg === "object") {
+      configSynced = true;
+      const wasEnabled = isExtensionEnabled;
+      updateConfig(cfg);
+      if (isExtensionEnabled && wasEnabled && !isProcessing) {
+        processScreen(false);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function onRouteChanged(newUrl = "") {
+    const nextKey = normalizeRouteKey(newUrl);
+    if (nextKey === lastRouteKey) return { changed: false, routeKey: nextKey };
+    lastRouteKey = nextKey;
+    clearProcessingWatchdog();
+    isProcessing = false;
+    solvedSignature = "";
+    hasAutoExported = false;
+    solvedListKeys.clear();
+    solvedBlockEls = new WeakSet();
+    skippedFailedListKeys.clear();
+    failCountMap.clear();
+    attemptedSingleQuestions.clear();
+    if (isExtensionEnabled) {
+      setTimeout(() => {
+        if (isExtensionEnabled && !isProcessing) processScreen(false);
+      }, 160);
+    }
+    return { changed: true, routeKey: nextKey };
   }
 
   function updateConfig(cfg = {}) {
@@ -1184,10 +1280,23 @@
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
     }
+    if (platformReadyHandler && typeof globalScope.removeEventListener === "function") {
+      globalScope.removeEventListener("flutterInAppWebViewPlatformReady", platformReadyHandler);
+      platformReadyHandler = null;
+    }
+    if (routeChangeHandler && typeof globalScope.removeEventListener === "function") {
+      globalScope.removeEventListener("popstate", routeChangeHandler);
+      globalScope.removeEventListener("hashchange", routeChangeHandler);
+      routeChangeHandler = null;
+    }
     clearProcessingWatchdog();
     clearTimeout(debounceTimer);
     clearTimeout(maxWaitTimer);
+    clearTimeout(retrySyncTimer1);
+    clearTimeout(retrySyncTimer2);
     maxWaitTimer = null;
+    retrySyncTimer1 = null;
+    retrySyncTimer2 = null;
   }
 
   globalScope.__autoSolverMobileCleanup = cleanupSelf;
@@ -1195,16 +1304,19 @@
   const agentApi = {
     updateConfig,
     forceScanNow,
+    onRouteChanged,
     retryQuestion: handleManualRetryQuestion,
     getDiagnostics: () => ({
       url: globalScope.location?.href || "",
       isQuiz: isQuizPage(),
       isProcessing,
       isExtensionEnabled,
+      configSynced,
       autoAdvanceEnabled,
       intelligenceMode,
       solvedListCount: solvedListKeys.size,
-      skippedListCount: skippedFailedListKeys.size
+      skippedListCount: skippedFailedListKeys.size,
+      dom: EXT.inspectDomSummary?.(globalScope.document)
     }),
     cleanup: cleanupSelf,
     _internalForTest: {
@@ -1214,10 +1326,14 @@
       processScreen,
       handleManualRetryQuestion,
       getRejectedAnswers,
+      syncConfigFromNative,
+      getVisibleBodyText,
       resetState: () => {
         clearProcessingWatchdog();
         isProcessing = false;
         solvedSignature = "";
+        configSynced = false;
+        lastRouteKey = normalizeRouteKey();
         isExtensionEnabled = true;
         autoAdvanceEnabled = true;
         intelligenceMode = "smart";
@@ -1240,12 +1356,31 @@
   // Chỉ khởi chạy Observer & Heartbeat trong môi trường trình duyệt thực (có MutationObserver)
   const doc = globalScope.document;
   if (doc && typeof globalScope.MutationObserver === "function") {
-    callNative("getConfig", {}).then((cfg) => {
-      if (cfg && typeof cfg === "object") updateConfig(cfg);
-      if (isQuizPage() && isExtensionEnabled) processScreen(false);
-    });
+    syncConfigFromNative();
+    if (typeof globalScope.addEventListener === "function") {
+      platformReadyHandler = () => {
+        syncConfigFromNative();
+      };
+      routeChangeHandler = () => {
+        onRouteChanged();
+      };
+      globalScope.addEventListener("flutterInAppWebViewPlatformReady", platformReadyHandler);
+      globalScope.addEventListener("popstate", routeChangeHandler);
+      globalScope.addEventListener("hashchange", routeChangeHandler);
+    }
+    retrySyncTimer1 = setTimeout(() => {
+      if (!configSynced) syncConfigFromNative();
+    }, 400);
+    retrySyncTimer2 = setTimeout(() => {
+      if (!configSynced) syncConfigFromNative();
+    }, 1400);
 
     const triggerDebouncedScan = () => {
+      const curKey = normalizeRouteKey();
+      if (curKey !== lastRouteKey) {
+        onRouteChanged();
+        return;
+      }
       if (!isExtensionEnabled || isProcessing) return;
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
@@ -1268,6 +1403,11 @@
     }
 
     heartbeatTimer = setInterval(() => {
+      const curKey = normalizeRouteKey();
+      if (curKey !== lastRouteKey) {
+        onRouteChanged();
+        return;
+      }
       if (isExtensionEnabled && !isProcessing) {
         processScreen(false);
       }

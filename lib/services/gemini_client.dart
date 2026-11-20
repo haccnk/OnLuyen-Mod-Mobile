@@ -232,6 +232,16 @@ class GeminiClient {
     throw FormatException('Không thể trích xuất đáp án từ chuỗi: $preview');
   }
 
+  static Map<String, dynamic> buildThinkingConfig(String model, int thinkingBudget) {
+    if (model.toLowerCase().contains('gemini-3')) {
+      final level = thinkingBudget <= 1024
+          ? 'LOW'
+          : (thinkingBudget <= 3584 ? 'MEDIUM' : 'HIGH');
+      return {'thinkingLevel': level};
+    }
+    return {'thinkingBudget': thinkingBudget};
+  }
+
   Future<GeminiCallResult> generateStructured({
     required String model,
     required String apiKey,
@@ -321,16 +331,19 @@ class GeminiClient {
     }
 
     ({String text, String finishReason}) resp;
+    final initialThinking = buildThinkingConfig(model, thinkingBudget);
     try {
-      resp = await runOnce(prompt, {'thinkingBudget': thinkingBudget}, 16384);
+      resp = await runOnce(prompt, initialThinking, 16384);
     } catch (err) {
       final msg = err.toString();
-      if (msg.contains('HTTP 400') && RegExp(r'thinkingBudget|thinkingConfig', caseSensitive: false).hasMatch(msg)) {
-        resp = await runOnce(
-          prompt,
-          {'thinkingLevel': thinkingBudget >= 2048 ? 'MEDIUM' : 'LOW'},
-          16384,
-        );
+      if (msg.contains('HTTP 400') &&
+          RegExp(r'thinkingBudget|thinkingLevel|thinkingConfig', caseSensitive: false).hasMatch(msg)) {
+        final fallbackThinking = initialThinking.containsKey('thinkingLevel')
+            ? <String, dynamic>{'thinkingBudget': thinkingBudget}
+            : <String, dynamic>{
+                'thinkingLevel': thinkingBudget >= 2048 ? 'MEDIUM' : 'LOW',
+              };
+        resp = await runOnce(prompt, fallbackThinking, 16384);
       } else {
         rethrow;
       }
@@ -345,7 +358,7 @@ class GeminiClient {
       final emergencyPrompt =
           '$prompt\n\n[KHẨN CẤP]: Viết "step" tối đa 20 từ và xuất đủ JSON đáp án hoàn chỉnh ngay lập tức!';
       try {
-        final retryResp = await runOnce(emergencyPrompt, {'thinkingBudget': 512}, 4096);
+        final retryResp = await runOnce(emergencyPrompt, buildThinkingConfig(model, 512), 4096);
         if (retryResp.text.isNotEmpty) {
           combinedText = retryResp.text;
           finishReason = retryResp.finishReason;

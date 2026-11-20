@@ -60,6 +60,11 @@ class _WebViewModScreenState extends State<WebViewModScreen> {
     final agentJs = await rootBundle.loadString('assets/js/mobile_agent.js');
 
     if (!mounted) return;
+    widget.controller.registerAssetScripts(
+      injectJs: injectJs,
+      extractorJs: extractorJs,
+      agentJs: agentJs,
+    );
     setState(() {
       _userScripts = UnmodifiableListView<UserScript>([
         UserScript(
@@ -181,7 +186,10 @@ class _WebViewModScreenState extends State<WebViewModScreen> {
               widget.controller.updateNavigationProgress(p / 100.0, null);
             },
             onLoadStop: (_, url) {
-              widget.controller.updateNavigationProgress(1.0, url?.toString());
+              widget.controller.onPageLoadFinished(url?.toString());
+            },
+            onUpdateVisitedHistory: (_, url, __) {
+              widget.controller.onRouteHistoryUpdated(url?.toString());
             },
           );
 
