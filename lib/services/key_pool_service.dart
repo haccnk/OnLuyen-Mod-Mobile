@@ -18,16 +18,13 @@ const List<String> kAuditorModels = [
 class _KeyModelState {
   final String apiKey;
   final String model;
-  int lastUsedAtMs;
-  int cooldownUntilMs;
-  int failCount;
+  int lastUsedAtMs = 0;
+  int cooldownUntilMs = 0;
+  int failCount = 0;
 
   _KeyModelState({
     required this.apiKey,
     required this.model,
-    this.lastUsedAtMs = 0,
-    this.cooldownUntilMs = 0,
-    this.failCount = 0,
   });
 }
 

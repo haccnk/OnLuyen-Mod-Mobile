@@ -291,7 +291,7 @@ class _ApiKeySettingsScreenState extends State<ApiKeySettingsScreen> {
               const SizedBox(width: 6),
               Switch(
                 value: entry.enabled,
-                activeColor: AppTheme.emeraldSolved,
+                activeThumbColor: AppTheme.emeraldSolved,
                 onChanged: (_) => widget.controller.toggleApiKey(entry.id),
               ),
             ],

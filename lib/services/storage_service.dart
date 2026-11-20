@@ -23,9 +23,7 @@ class StorageService {
   }
 
   Future<SharedPreferences> _ensurePrefs() async {
-    if (_prefs == null) {
-      _prefs = await SharedPreferences.getInstance();
-    }
+    _prefs ??= await SharedPreferences.getInstance();
     return _prefs!;
   }
 

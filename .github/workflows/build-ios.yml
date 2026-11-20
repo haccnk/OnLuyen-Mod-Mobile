@@ -1,0 +1,75 @@
+name: Build iOS IPA Unsigned (OnLuyen Mod Mobile)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build_ios:
+    name: Build Unsigned iOS IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter (Stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Bootstrap iOS Xcode Project Scaffolding
+        run: |
+          mkdir -p /tmp/custom_ios
+          cp ios/Runner/Info.plist /tmp/custom_ios/Info.plist
+          cp ios/Runner/AppDelegate.swift /tmp/custom_ios/AppDelegate.swift
+          cp ios/Podfile /tmp/custom_ios/Podfile
+
+          flutter create --org com.onluyenmod --project-name onluyen_mod_mobile --platforms=ios /tmp/scaffold_ios
+          rm -rf ios
+          cp -r /tmp/scaffold_ios/ios ./ios
+
+          cp /tmp/custom_ios/Info.plist ios/Runner/Info.plist
+          cp /tmp/custom_ios/AppDelegate.swift ios/Runner/AppDelegate.swift
+          cp /tmp/custom_ios/Podfile ios/Podfile
+
+          python3 -c '
+          import pathlib, re
+          pbx = pathlib.Path("ios/Runner.xcodeproj/project.pbxproj")
+          if pbx.exists():
+              txt = pbx.read_text()
+              txt = re.sub(r"IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;", "IPHONEOS_DEPLOYMENT_TARGET = 13.0;", txt)
+              pbx.write_text(txt)
+          '
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Install CocoaPods dependencies
+        run: |
+          cd ios
+          pod install --repo-update
+          cd ..
+
+      - name: Build Unsigned iOS App
+        run: flutter build ios --release --no-codesign
+
+      - name: Package Runner.app into Unsigned .ipa
+        run: |
+          mkdir -p build/ios/ipa
+          cd build/ios/iphoneos
+          mkdir -p Payload
+          cp -r Runner.app Payload/
+          zip -ry ../ipa/OnLuyen_Mod_Mobile-v1.0-unsigned.ipa Payload/
+          cd ../../..
+
+      - name: Upload Unsigned IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnLuyen-Mod-Mobile-iOS-IPA-Unsigned
+          path: build/ios/ipa/OnLuyen_Mod_Mobile-v1.0-unsigned.ipa
+          retention-days: 30
