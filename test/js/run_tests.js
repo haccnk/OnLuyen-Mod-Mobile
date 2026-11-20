@@ -747,6 +747,93 @@ test("20. mobile_agent.js: scrollIntoView + Post-Click Verification 250ms tự c
   assert.ok(solvedCodes.includes("Câu 2"), "Phải tự động chuyển sang giải Câu 2");
 });
 
+test("21. Benchmark hiệu năng DOM nặng 2000 node (mobile 390px + KaTeX + Drawer): quét < 50ms & ít reflow", () => {
+  const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  let rectCalls = 0;
+  let csCalls = 0;
+  const origCs = env.getComputedStyle;
+  env.getComputedStyle = (node) => {
+    csCalls += 1;
+    return origCs(node);
+  };
+
+  const origCreate = doc.createElement.bind(doc);
+  doc.createElement = (tag) => {
+    const node = origCreate(tag);
+    const origRect = node.getBoundingClientRect.bind(node);
+    node.getBoundingClientRect = () => {
+      rectCalls += 1;
+      return origRect();
+    };
+    return node;
+  };
+
+  const { EXT } = loadModulesInEnv(env);
+
+  // Header + Drawer fixed với 40 thẻ số
+  doc.body.appendChild(el(doc, "header", { rect: { top: 0, left: 0, width: 390, height: 56 } }, [
+    el(doc, "span", { text: "00:45:12" })
+  ]));
+  const drawer = el(doc, "div", {
+    className: "ant-drawer answer-sheet",
+    cs: { position: "fixed" },
+    rect: { top: 0, left: 40, width: 350, height: 844 }
+  });
+  for (let i = 1; i <= 40; i++) {
+    drawer.appendChild(el(doc, "button", { text: String(i), rect: { top: i * 18, left: 50, width: 32, height: 32 } }));
+  }
+  doc.body.appendChild(drawer);
+
+  // Khung chính với ~2000 node + công thức KaTeX chứa A B C D
+  const mainCard = el(doc, "div", { rect: { top: 70, left: 10, width: 370, height: 1200 } });
+  mainCard.appendChild(el(doc, "p", { text: "Chọn đáp án đúng nhất:", rect: { top: 80, left: 16, width: 340, height: 30 } }));
+  for (let i = 0; i < 480; i++) {
+    mainCard.appendChild(el(doc, "div", { rect: { top: 120, left: 16, width: 340, height: 22 } }, [
+      el(doc, "span", { text: `x${i}` }),
+      el(doc, "span", { className: "katex" }, [el(doc, "span", { text: i % 4 === 0 ? "A" : "x" })]),
+      el(doc, "b", { text: `${i}` })
+    ]));
+  }
+
+  // Câu hỏi trắc nghiệm thật ở cuối
+  const opts = el(doc, "div", { rect: { top: 900, left: 16, width: 350, height: 240 } });
+  ["A", "B", "C", "D"].forEach((L, idx) => {
+    const y = 910 + idx * 52;
+    opts.appendChild(el(doc, "div", { rect: { top: y, left: 16, width: 340, height: 42 } }, [
+      el(doc, "span", { text: L, rect: { top: y, left: 20, width: 24, height: 24 } }),
+      el(doc, "span", { text: `Phương án đúng ${L}`, rect: { top: y, left: 52, width: 260, height: 26 } })
+    ]));
+  });
+  mainCard.appendChild(opts);
+  doc.body.appendChild(mainCard);
+
+  const t0 = Date.now();
+  EXT.beginScanCache();
+  let cls;
+  let payload;
+  let detectRectCalls = 0;
+  let detectCsCalls = 0;
+  try {
+    const blocks = EXT.getMultiBlocks(doc);
+    assert.strictEqual(blocks.length, 0);
+    cls = EXT.classifyQuestionInScope(doc, true);
+    detectRectCalls = rectCalls;
+    detectCsCalls = csCalls;
+    payload = EXT.extractQuestionPayload(doc, cls);
+  } finally {
+    EXT.endScanCache();
+  }
+  const elapsedMs = Date.now() - t0;
+
+  assert.strictEqual(cls.type, "MCQ");
+  assert.strictEqual(cls.mcq[2].text, "Phương án đúng C");
+  assert.ok(payload.stemText.includes("Chọn đáp án đúng nhất"));
+  assert.ok(elapsedMs < 50, `Quét 2000 node mất quá lâu: ${elapsedMs}ms`);
+  assert.ok(detectCsCalls < 40, `Quá nhiều getComputedStyle khi nhận diện câu hỏi (${detectCsCalls} lần)`);
+  assert.ok(detectRectCalls < 80, `Quá nhiều getBoundingClientRect khi nhận diện câu hỏi (${detectRectCalls} lần)`);
+  console.log(`    [Benchmark 2000 nodes: ${elapsedMs}ms, detectRectCalls=${detectRectCalls}, detectCsCalls=${detectCsCalls}]`);
+});
+
 (async () => {
   let passed = 0;
   let failed = 0;

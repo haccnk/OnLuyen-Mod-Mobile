@@ -10,11 +10,12 @@
   }
 
   const WATCHDOG_TIMEOUT_MS = 55000;
-  const POST_CLICK_VERIFY_DELAY_MS = 250;
+  const POST_CLICK_VERIFY_DELAY_MS = 200;
 
   let isProcessing = false;
   let solvedSignature = "";
   let debounceTimer = null;
+  let maxWaitTimer = null;
   let isExtensionEnabled = false;
   let autoAdvanceEnabled = true;
   let intelligenceMode = "smart";
@@ -25,6 +26,7 @@
   let lastWaitingStatusAt = 0;
 
   const solvedListKeys = new Set();
+  let solvedBlockEls = new WeakSet();
   const skippedFailedListKeys = new Set();
   const failCountMap = new Map();
   const attemptedSingleQuestions = new Set();
@@ -149,39 +151,63 @@
   }
 
   function findContinueButton(scopeDoc = document) {
-    return (
-      Array.from(scopeDoc.querySelectorAll?.("button, [role='button'], a, div, span") || []).find((el) => {
-        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
-        if (r.width === 0 || r.height === 0 || (el.children?.length || 0) > 2) return false;
-        if (EXT.isInsideNavOrChrome(el)) return false;
-        const t = (el.innerText || el.textContent || "").trim().toUpperCase();
-        return t === "TIẾP TỤC" || t === "CÂU TIẾP" || t === "TIẾP THEO" || t === "CÂU SAU";
-      }) || null
-    );
+    const nodes = scopeDoc.querySelectorAll?.("button, [role='button'], a, div, span") || [];
+    for (const el of nodes) {
+      if ((el.children?.length || 0) > 2) continue;
+      const raw = (el.textContent || el.innerText || "").trim();
+      if (raw.length === 0 || raw.length > 14) continue;
+      const t = raw.toUpperCase();
+      if (t !== "TIẾP TỤC" && t !== "CÂU TIẾP" && t !== "TIẾP THEO" && t !== "CÂU SAU") continue;
+      const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+      if (r.width === 0 || r.height === 0) continue;
+      if (EXT.isInsideNavOrChrome(el)) continue;
+      return el;
+    }
+    return null;
+  }
+
+  function resolveAndDetect() {
+    const doc = globalScope.document;
+    if (!doc) return { scopeDoc: null, blocks: [], classified: { type: null, shortInp: null, tf: null, mcq: [] } };
+    if (typeof EXT.beginScanCache === "function") EXT.beginScanCache();
+    try {
+      let blocks = EXT.getMultiBlocks(doc);
+      if (blocks.length >= 2) {
+        return { scopeDoc: doc, blocks, classified: { type: null, shortInp: null, tf: null, mcq: [] } };
+      }
+      let classified = EXT.classifyQuestionInScope(doc, true);
+      if (classified.type) {
+        return { scopeDoc: doc, blocks: [], classified };
+      }
+
+      const iframes = Array.from(doc.querySelectorAll?.("iframe") || []);
+      for (const ifr of iframes) {
+        try {
+          const r = ifr.getBoundingClientRect();
+          if (r.width < 120 || r.height < 120) continue;
+          const innerDoc = ifr.contentDocument || ifr.contentWindow?.document;
+          if (!innerDoc || !innerDoc.body) continue;
+          blocks = EXT.getMultiBlocks(innerDoc);
+          if (blocks.length >= 2) {
+            return { scopeDoc: innerDoc, blocks, classified: { type: null, shortInp: null, tf: null, mcq: [] } };
+          }
+          classified = EXT.classifyQuestionInScope(innerDoc, true);
+          if (classified.type) {
+            return { scopeDoc: innerDoc, blocks: [], classified };
+          }
+        } catch (e) {}
+      }
+      return { scopeDoc: doc, blocks: [], classified };
+    } finally {
+      if (typeof EXT.endScanCache === "function") EXT.endScanCache();
+    }
   }
 
   function resolveTargetScopeDoc() {
-    const doc = globalScope.document;
-    if (!doc) return null;
-    if (EXT.getMultiBlocks(doc).length >= 2 || EXT.classifyQuestionInScope(doc, true).type) {
-      return doc;
-    }
-    const iframes = Array.from(doc.querySelectorAll?.("iframe") || []);
-    for (const ifr of iframes) {
-      try {
-        const r = ifr.getBoundingClientRect();
-        if (r.width < 120 || r.height < 120) continue;
-        const innerDoc = ifr.contentDocument || ifr.contentWindow?.document;
-        if (!innerDoc || !innerDoc.body) continue;
-        if (EXT.getMultiBlocks(innerDoc).length >= 2 || EXT.classifyQuestionInScope(innerDoc, true).type) {
-          return innerDoc;
-        }
-      } catch (e) {}
-    }
-    return doc;
+    return resolveAndDetect().scopeDoc;
   }
 
-  function isQuizPage(scopeDoc = globalScope.document) {
+  function isQuizPage(scopeDoc = globalScope.document, preDetectedType = undefined) {
     if (!scopeDoc || !scopeDoc.body) return false;
     const loc = globalScope.location || { pathname: "", hash: "", search: "" };
     const fullUrl = ((loc.pathname || "") + (loc.hash || "") + (loc.search || "")).toLowerCase();
@@ -190,13 +216,10 @@
       return false;
     }
 
-    const txt = scopeDoc.body.innerText || scopeDoc.body.textContent || "";
-    const hasContinue = Boolean(findContinueButton(scopeDoc));
-    if (
-      fullUrl.includes("result") ||
-      (/Kết quả chi tiết|Số câu đúng|Tổng điểm/i.test(txt) && /Đáp án của bạn/i.test(txt) && !hasContinue)
-    ) {
-      return false;
+    const txt = scopeDoc.body.textContent || scopeDoc.body.innerText || "";
+    if (fullUrl.includes("result")) return false;
+    if (/Kết quả chi tiết|Số câu đúng|Tổng điểm/i.test(txt) && /Đáp án của bạn/i.test(txt)) {
+      if (!findContinueButton(scopeDoc)) return false;
     }
 
     if (
@@ -208,6 +231,9 @@
     }
     if (/#\d{5,}/.test(txt) || /(?:Câu(?:\s+hỏi)?|Question)\s+\d+/i.test(txt) || /Nộp bài|Phiếu trả lời/i.test(txt)) {
       return true;
+    }
+    if (preDetectedType !== undefined) {
+      return preDetectedType !== null;
     }
     return EXT.classifyQuestionInScope(scopeDoc, true).type !== null;
   }
@@ -739,41 +765,52 @@
     if (isProcessing || !isExtensionEnabled) return;
 
     let task = null;
-    for (const b of blocks) {
-      const classified = EXT.classifyQuestionInScope(b.blockEl, true);
-      if (!classified.type) continue;
+    if (typeof EXT.beginScanCache === "function") EXT.beginScanCache();
+    try {
+      for (const b of blocks) {
+        if (solvedBlockEls.has(b.blockEl)) continue;
 
-      const { type, shortInp, tf, mcq } = classified;
-      const payload = EXT.extractQuestionPayload(b.blockEl, classified);
-      const qKey = `LIST_Q${b.qNum}_${type}_${payload.stemText.slice(0, 50)}`;
-      if (skippedFailedListKeys.has(qKey)) continue;
+        const classified = EXT.classifyQuestionInScope(b.blockEl, true);
+        if (!classified.type) continue;
 
-      const uiAns = EXT.detectUIAns(type, mcq, shortInp, tf);
-      if (solvedListKeys.has(qKey) || uiAns) {
-        if (uiAns && !solvedListKeys.has(qKey)) {
-          saveCleanExportItem({
-            signature: qKey,
-            qLabel: `Câu ${b.qNum}`,
-            question: payload.extraDetails ? `${payload.stemText}\n${payload.extraDetails}` : payload.stemText,
-            answer: formatCleanAnswerForExport(type, uiAns, mcq)
-          });
+        const { type, shortInp, tf, mcq } = classified;
+        const payload = EXT.extractQuestionPayload(b.blockEl, classified);
+        const qKey = `LIST_Q${b.qNum}_${type}_${payload.stemText.slice(0, 50)}`;
+        if (skippedFailedListKeys.has(qKey)) {
+          solvedBlockEls.add(b.blockEl);
+          continue;
         }
-        solvedListKeys.add(qKey);
-        continue;
-      }
 
-      task = {
-        qNum: b.qNum,
-        blockEl: b.blockEl,
-        qKey,
-        classified,
-        type,
-        payload,
-        tf,
-        mcq,
-        shortInp
-      };
-      break;
+        const uiAns = EXT.detectUIAns(type, mcq, shortInp, tf);
+        if (solvedListKeys.has(qKey) || uiAns) {
+          if (uiAns && !solvedListKeys.has(qKey)) {
+            saveCleanExportItem({
+              signature: qKey,
+              qLabel: `Câu ${b.qNum}`,
+              question: payload.extraDetails ? `${payload.stemText}\n${payload.extraDetails}` : payload.stemText,
+              answer: formatCleanAnswerForExport(type, uiAns, mcq)
+            });
+          }
+          solvedListKeys.add(qKey);
+          solvedBlockEls.add(b.blockEl);
+          continue;
+        }
+
+        task = {
+          qNum: b.qNum,
+          blockEl: b.blockEl,
+          qKey,
+          classified,
+          type,
+          payload,
+          tf,
+          mcq,
+          shortInp
+        };
+        break;
+      }
+    } finally {
+      if (typeof EXT.endScanCache === "function") EXT.endScanCache();
     }
 
     if (!task) {
@@ -791,7 +828,7 @@
     scrollTargetIntoCenter(task.blockEl);
     syncStatus(`🧠 Đang phân tích Câu ${task.qNum}/${blocks.length} (${task.type})...`);
 
-    await waitMs(180);
+    await waitMs(40);
     const images = await prepareVisualAttachments(task.payload, task.classified, false);
     const res = await requestNativeSolve({
       questionType: task.type,
@@ -814,15 +851,16 @@
       failCountMap.set(task.qKey, fails);
       if (fails >= 3) {
         skippedFailedListKeys.add(task.qKey);
+        solvedBlockEls.add(task.blockEl);
         syncStatus(`⚠️ Câu ${task.qNum} lỗi 3 lần, tạm bỏ qua để giải tiếp câu khác...`);
         isProcessing = false;
-        if (isExtensionEnabled) setTimeout(() => processScreen(false), 600);
+        if (isExtensionEnabled) setTimeout(() => processScreen(false), 150);
       } else {
-        syncStatus(`⚠️ Lỗi tạm thời Câu ${task.qNum} (lần ${fails}/3), thử lại sau 4.5s...`);
+        syncStatus(`⚠️ Lỗi tạm thời Câu ${task.qNum} (lần ${fails}/3), thử lại sau 3.5s...`);
         setTimeout(() => {
           isProcessing = false;
           if (isExtensionEnabled) processScreen(false);
-        }, 4500);
+        }, 3500);
       }
       return;
     }
@@ -833,6 +871,7 @@
     const cleanExportAns = formatCleanAnswerForExport(task.type, normAns, task.mcq);
 
     solvedListKeys.add(task.qKey);
+    solvedBlockEls.add(task.blockEl);
     saveCleanExportItem({
       signature: task.qKey,
       qLabel: `Câu ${task.qNum}`,
@@ -859,17 +898,41 @@
       setTimeout(() => {
         isProcessing = false;
         if (isExtensionEnabled) processScreen(false);
-      }, 350);
+      }, 150);
     });
   }
 
   // =========================================================================
   // CHẾ ĐỘ TỪNG CÂU (SINGLE-STEP MODE)
   // =========================================================================
+  function findFastNextActionButton(doc, includeTraLoi = false) {
+    const nodes = doc.querySelectorAll?.("button, [role='button'], a, div, span") || [];
+    let match = null;
+    for (const el of nodes) {
+      if ((el.children?.length || 0) > 2) continue;
+      const raw = (el.textContent || el.innerText || "").trim();
+      if (raw.length === 0 || raw.length > 14) continue;
+      const t = raw.toUpperCase();
+      const isOk =
+        t === "TIẾP TỤC" ||
+        t === "TIẾP THEO" ||
+        t === "CÂU TIẾP" ||
+        t === "CÂU SAU" ||
+        (includeTraLoi && t === "TRẢ LỜI");
+      if (!isOk) continue;
+      const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+      if (r.width === 0 || r.height === 0) continue;
+      if (EXT.isInsideNavOrChrome(el)) continue;
+      match = el;
+      if (!includeTraLoi) return el;
+    }
+    return match;
+  }
+
   function advanceSingleStep(currentQKey) {
     attemptedSingleQuestions.add(currentQKey);
 
-    setTimeout(() => {
+    setTimeout(async () => {
       if (!isExtensionEnabled || !isQuizPage()) {
         isProcessing = false;
         return;
@@ -880,86 +943,79 @@
       }
 
       const doc = globalScope.document;
-      const snap = (doc.body?.innerText || doc.body?.textContent || "").slice(0, 350);
+      const snap = (doc.body?.textContent || doc.body?.innerText || "").slice(0, 350);
 
-      const actionBtns = Array.from(doc.querySelectorAll?.("button, [role='button'], a, div, span") || []).filter((el) => {
-        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
-        if (r.width === 0 || r.height === 0 || (el.children?.length || 0) > 2) return false;
-        if (EXT.isInsideNavOrChrome(el)) return false;
-        const t = (el.innerText || el.textContent || "").trim().toUpperCase();
-        return t === "TIẾP TỤC" || t === "TRẢ LỜI" || t === "TIẾP THEO" || t === "CÂU TIẾP" || t === "CÂU SAU";
-      });
-
-      if (actionBtns.length > 0) {
-        const btn = actionBtns[actionBtns.length - 1];
-        dispatchClick(btn.closest ? btn.closest("button") || btn : btn);
+      const actionBtn = findFastNextActionButton(doc, true);
+      if (actionBtn) {
+        dispatchClick(actionBtn.closest ? actionBtn.closest("button") || actionBtn : actionBtn);
       }
 
-      setTimeout(() => {
+      await waitMs(220);
+      if (dismissSubmitModal()) {
+        isProcessing = false;
+        return;
+      }
+
+      const followUpBtn = findFastNextActionButton(doc, false);
+      if (followUpBtn) {
+        dispatchClick(followUpBtn.closest ? followUpBtn.closest("button") || followUpBtn : followUpBtn);
+      }
+
+      let changed = false;
+      for (let i = 0; i < 4; i++) {
+        await waitMs(120);
         if (dismissSubmitModal()) {
           isProcessing = false;
           return;
         }
-
-        const followUpBtn = Array.from(doc.querySelectorAll?.("button, [role='button'], div, span") || []).find((el) => {
-          const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
-          if (r.width === 0 || r.height === 0 || (el.children?.length || 0) > 2) return false;
-          if (EXT.isInsideNavOrChrome(el)) return false;
-          const t = (el.innerText || el.textContent || "").trim().toUpperCase();
-          return t === "TIẾP TỤC" || t === "CÂU TIẾP" || t === "TIẾP THEO";
-        });
-
-        if (followUpBtn) {
-          dispatchClick(followUpBtn.closest ? followUpBtn.closest("button") || followUpBtn : followUpBtn);
+        const nowSnap = (doc.body?.textContent || doc.body?.innerText || "").slice(0, 350);
+        if (nowSnap !== snap) {
+          changed = true;
+          break;
         }
+      }
 
-        setTimeout(() => {
-          if (dismissSubmitModal()) {
-            isProcessing = false;
-            return;
-          }
+      if (!changed) {
+        const { map, activeNum } = getNavState();
+        const maxQ = map.size > 0 ? Math.max(...map.keys()) : 0;
+        const nextNum = activeNum ? activeNum + 1 : attemptedSingleQuestions.size + 1;
 
-          const nowSnap = (doc.body?.innerText || doc.body?.textContent || "").slice(0, 350);
-          if (nowSnap === snap) {
-            const { map, activeNum } = getNavState();
-            const maxQ = map.size > 0 ? Math.max(...map.keys()) : 0;
-            const nextNum = activeNum ? activeNum + 1 : attemptedSingleQuestions.size + 1;
-
-            if (maxQ > 0 && nextNum <= maxQ && map.has(nextNum)) {
-              dispatchClick(map.get(nextNum));
-            } else {
-              syncStatus("✅ Đã hoàn thành toàn bộ đề! Sẵn sàng xuất file đáp án.");
-              triggerAutoExportNotification();
-              isProcessing = false;
-              return;
-            }
-          }
-
+        if (maxQ > 0 && nextNum <= maxQ && map.has(nextNum)) {
+          dispatchClick(map.get(nextNum));
+        } else {
+          syncStatus("✅ Đã hoàn thành toàn bộ đề! Sẵn sàng xuất file đáp án.");
+          triggerAutoExportNotification();
           isProcessing = false;
-          if (isExtensionEnabled) setTimeout(() => processScreen(false), 400);
-        }, 450);
-      }, 550);
-    }, 380);
+          return;
+        }
+      }
+
+      isProcessing = false;
+      if (isExtensionEnabled) setTimeout(() => processScreen(false), 120);
+    }, 120);
   }
 
   async function processScreen(forceDiagnostic = false) {
     if (!isExtensionEnabled) return { reason: "disabled" };
     if (isProcessing && !forceDiagnostic) return { reason: "busy" };
 
-    const scopeDoc = resolveTargetScopeDoc();
-    if (!scopeDoc || !isQuizPage(scopeDoc)) {
+    const { scopeDoc, blocks, classified } = resolveAndDetect();
+    const hasAnyDetected = blocks.length >= 2 || Boolean(classified.type);
+    if (!scopeDoc || !isQuizPage(scopeDoc, hasAnyDetected ? (classified.type || "LIST") : null)) {
       if (forceDiagnostic) syncStatus("ℹ️ Trang hiện tại không phải giao diện làm bài.");
       return { reason: "not_quiz_page", url: globalScope.location?.href || "" };
     }
     if (dismissSubmitModal()) return { reason: "submit_modal_dismissed" };
 
-    const bodyTxt = scopeDoc.body?.innerText || scopeDoc.body?.textContent || "";
-    const resumeBtn = Array.from(scopeDoc.querySelectorAll?.("button, [role='button'], div") || []).find(
-      (b) => (b.innerText || b.textContent || "").trim() === "Tiếp tục" && bodyTxt.includes("Tạm dừng")
-    );
-    if (resumeBtn && bodyTxt.includes("Bạn có muốn tiếp tục")) {
-      dispatchClick(resumeBtn);
-      return { reason: "resumed" };
+    const bodyTxt = scopeDoc.body?.textContent || scopeDoc.body?.innerText || "";
+    if (bodyTxt.includes("Tạm dừng") && bodyTxt.includes("Bạn có muốn tiếp tục")) {
+      const resumeBtn = Array.from(scopeDoc.querySelectorAll?.("button, [role='button'], div") || []).find(
+        (b) => (b.textContent || "").trim() === "Tiếp tục"
+      );
+      if (resumeBtn) {
+        dispatchClick(resumeBtn);
+        return { reason: "resumed" };
+      }
     }
 
     if (autoAdvanceEnabled && /Đáp án đúng|Lời giải chi tiết/i.test(bodyTxt)) {
@@ -969,18 +1025,16 @@
         dispatchClick(nextBtn.closest ? nextBtn.closest("button") || nextBtn : nextBtn);
         setTimeout(() => {
           if (isExtensionEnabled) processScreen(false);
-        }, 500);
+        }, 250);
         return { reason: "step_explanation_advanced" };
       }
     }
 
-    const blocks = EXT.getMultiBlocks(scopeDoc);
     if (blocks.length >= 2) {
       processListMode(blocks);
       return { reason: "list_mode", blocks: blocks.length };
     }
 
-    const classified = EXT.classifyQuestionInScope(scopeDoc, true);
     if (!classified.type) {
       const now = Date.now();
       if (forceDiagnostic || now - lastWaitingStatusAt > 6000) {
@@ -1018,7 +1072,7 @@
     solvedSignature = curSig;
     syncStatus(`🧠 Đang giải ${qCode} (${type})...`);
 
-    await waitMs(150);
+    await waitMs(40);
     const images = await prepareVisualAttachments(payload, classified, false);
     const res = await requestNativeSolve({
       questionType: type,
@@ -1117,6 +1171,7 @@
     solvedSignature = "";
     failCountMap.clear();
     skippedFailedListKeys.clear();
+    solvedBlockEls = new WeakSet();
     return processScreen(true);
   }
 
@@ -1131,6 +1186,8 @@
     }
     clearProcessingWatchdog();
     clearTimeout(debounceTimer);
+    clearTimeout(maxWaitTimer);
+    maxWaitTimer = null;
   }
 
   globalScope.__autoSolverMobileCleanup = cleanupSelf;
@@ -1166,6 +1223,7 @@
         intelligenceMode = "smart";
         hasAutoExported = false;
         solvedListKeys.clear();
+        solvedBlockEls = new WeakSet();
         skippedFailedListKeys.clear();
         failCountMap.clear();
         attemptedSingleQuestions.clear();
@@ -1187,11 +1245,24 @@
       if (isQuizPage() && isExtensionEnabled) processScreen(false);
     });
 
-    domObserver = new globalScope.MutationObserver(() => {
-      if (!isExtensionEnabled) return;
+    const triggerDebouncedScan = () => {
+      if (!isExtensionEnabled || isProcessing) return;
       clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => processScreen(false), 450);
-    });
+      debounceTimer = setTimeout(() => {
+        clearTimeout(maxWaitTimer);
+        maxWaitTimer = null;
+        processScreen(false);
+      }, 150);
+      if (!maxWaitTimer) {
+        maxWaitTimer = setTimeout(() => {
+          maxWaitTimer = null;
+          clearTimeout(debounceTimer);
+          processScreen(false);
+        }, 350);
+      }
+    };
+
+    domObserver = new globalScope.MutationObserver(triggerDebouncedScan);
     if (doc.documentElement) {
       domObserver.observe(doc.documentElement, { childList: true, subtree: true });
     }
@@ -1200,6 +1271,6 @@
       if (isExtensionEnabled && !isProcessing) {
         processScreen(false);
       }
-    }, 2000);
+    }, 850);
   }
 })(typeof window !== "undefined" ? window : globalThis);

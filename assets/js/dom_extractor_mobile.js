@@ -11,18 +11,42 @@
   const UI_NOISE_LINE_RE =
     /^(Nộp bài|Thời gian(?:\s+còn\s+lại)?|Thống kê|Phiếu trả lời|Danh sách câu hỏi|Câu đã làm|Câu chưa làm|Tiếp tục|Trả lời|Quay lại|Đáp án của bạn|Đáp án đúng|Báo cáo|Báo lỗi|Góp ý|Lưu bài|Thoát)$/i;
 
+  function getFastText(el) {
+    if (!el) return "";
+    return el.textContent || "";
+  }
+
   function getText(el) {
     if (!el) return "";
-    if (typeof el.innerText === "string" && el.innerText.length > 0) return el.innerText;
-    return el.textContent || "";
+    if (typeof el.textContent === "string" && el.textContent.length > 0) return el.textContent;
+    return el.innerText || "";
+  }
+
+  let _scanCache = null;
+
+  function beginScanCache() {
+    _scanCache = {
+      rect: new WeakMap(),
+      cs: new WeakMap(),
+      hidden: new WeakMap(),
+      navSelf: new WeakMap(),
+      navInside: new WeakMap()
+    };
+  }
+
+  function endScanCache() {
+    _scanCache = null;
   }
 
   function safeRect(el) {
     if (!el || typeof el.getBoundingClientRect !== "function") {
       return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
     }
+    if (_scanCache && _scanCache.rect.has(el)) {
+      return _scanCache.rect.get(el);
+    }
     const r = el.getBoundingClientRect();
-    return {
+    const out = {
       top: r.top ?? 0,
       left: r.left ?? 0,
       right: r.right ?? (r.left ?? 0) + (r.width ?? 0),
@@ -30,16 +54,23 @@
       width: r.width ?? 0,
       height: r.height ?? 0
     };
+    if (_scanCache) _scanCache.rect.set(el, out);
+    return out;
   }
 
   function safeComputedStyle(el) {
     if (!el || el.nodeType !== 1) return null;
+    if (_scanCache && _scanCache.cs.has(el)) {
+      return _scanCache.cs.get(el);
+    }
+    let cs = el.style || null;
     try {
       if (typeof globalScope.getComputedStyle === "function") {
-        return globalScope.getComputedStyle(el);
+        cs = globalScope.getComputedStyle(el);
       }
     } catch (e) {}
-    return el.style || null;
+    if (_scanCache) _scanCache.cs.set(el, cs);
+    return cs;
   }
 
   function getEffectiveRect(el) {
@@ -56,19 +87,30 @@
 
   function isHiddenElement(el) {
     if (!el || el.nodeType !== 1) return false;
-    if (el.hidden) return true;
-    const cls = String(el.className || "");
-    if (/\b(MathJax_Preview|sr-only|visually-hidden)\b/i.test(cls)) return true;
-    if (el.id === "__onluyen_capture_stage") return true;
-    const inlineStyle = el.style || {};
-    if (inlineStyle.display === "none" || inlineStyle.visibility === "hidden") {
-      return true;
+    if (_scanCache && _scanCache.hidden.has(el)) {
+      return _scanCache.hidden.get(el);
     }
-    const cs = safeComputedStyle(el);
-    if (cs) {
-      if (cs.display === "none" || cs.visibility === "hidden") return true;
+    let hidden = false;
+    if (el.hidden) {
+      hidden = true;
+    } else {
+      const cls = String(el.className || "");
+      if (/\b(MathJax_Preview|sr-only|visually-hidden)\b/i.test(cls) || el.id === "__onluyen_capture_stage") {
+        hidden = true;
+      } else {
+        const inlineStyle = el.style || {};
+        if (inlineStyle.display === "none" || inlineStyle.visibility === "hidden") {
+          hidden = true;
+        } else {
+          const cs = safeComputedStyle(el);
+          if (cs && (cs.display === "none" || cs.visibility === "hidden")) {
+            hidden = true;
+          }
+        }
+      }
     }
-    return false;
+    if (_scanCache) _scanCache.hidden.set(el, hidden);
+    return hidden;
   }
 
   function closestMatching(el, predicate) {
@@ -308,18 +350,19 @@
     const inlineDec = String(el.style?.textDecoration || el.style?.textDecorationLine || "");
     if (/underline/i.test(inlineDec)) return true;
 
+    if ((el.children?.length || 0) > 2) return false;
+    const txt = getFastText(el).trim();
+    if (txt.length === 0 || txt.length > 40 || !/[A-Za-zÀ-ỹ]/.test(txt)) return false;
+
     const cs = safeComputedStyle(el);
     if (cs) {
       const dec = String(cs.textDecorationLine || cs.textDecoration || "");
       if (/underline/i.test(dec)) return true;
 
-      const txt = getText(el).trim();
-      if (txt.length > 0 && txt.length <= 40 && (el.children?.length || 0) <= 2) {
-        const bStyle = String(cs.borderBottomStyle || el.style?.borderBottomStyle || "");
-        const bWidth = parseFloat(cs.borderBottomWidth || el.style?.borderBottomWidth || "0");
-        if (bStyle && bStyle !== "none" && bWidth >= 0.8 && bWidth <= 3.5) {
-          return true;
-        }
+      const bStyle = String(cs.borderBottomStyle || el.style?.borderBottomStyle || "");
+      const bWidth = parseFloat(cs.borderBottomWidth || el.style?.borderBottomWidth || "0");
+      if (bStyle && bStyle !== "none" && bWidth >= 0.8 && bWidth <= 3.5) {
+        return true;
       }
     }
     return false;
@@ -586,11 +629,13 @@
   function countNumericPills(container) {
     if (!container || typeof container.querySelectorAll !== "function") return 0;
     let count = 0;
+    let scanned = 0;
     const nodes = container.querySelectorAll("button, a, span, div, li");
     for (const n of nodes) {
+      if (++scanned > 120) break;
       if (n.children && n.children.length > 0) continue;
-      const t = getText(n).trim();
-      if (/^\d{1,3}$/.test(t)) {
+      const t = getFastText(n).trim();
+      if (t.length >= 1 && t.length <= 3 && /^\d{1,3}$/.test(t)) {
         const num = parseInt(t, 10);
         if (num >= 1 && num <= 150) count++;
       }
@@ -599,7 +644,7 @@
     return count;
   }
 
-  function isNavPanelContainer(el) {
+  function computeIsNavPanelContainer(el) {
     if (!el || el.nodeType !== 1) return false;
     const tag = (el.tagName || "").toLowerCase();
     if (tag === "body" || tag === "html") return false;
@@ -644,7 +689,7 @@
     if (isFixedOverlay || r.width === 0 || r.width <= maxNavWidth) {
       const pills = countNumericPills(el);
       if (pills >= 5) {
-        const text = getText(el);
+        const text = getFastText(el);
         const nonDigitText = text.replace(/\d+/g, "").trim();
         if (/Phiếu trả lời|Danh sách câu|Câu đã làm|Câu chưa làm/i.test(text) && nonDigitText.length < 320) {
           return true;
@@ -657,16 +702,47 @@
     return false;
   }
 
+  function isNavPanelContainer(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (_scanCache && _scanCache.navSelf.has(el)) {
+      return _scanCache.navSelf.get(el);
+    }
+    const res = computeIsNavPanelContainer(el);
+    if (_scanCache) _scanCache.navSelf.set(el, res);
+    return res;
+  }
+
   function isInsideNavOrChrome(el) {
     if (!el) return false;
+    if (_scanCache && _scanCache.navInside.has(el)) {
+      return _scanCache.navInside.get(el);
+    }
+    const chain = [];
     let cur = el;
+    let found = false;
     while (cur && cur.nodeType === 1) {
       const tag = (cur.tagName || "").toLowerCase();
       if (tag === "body" || tag === "html") break;
-      if (isNavPanelContainer(cur)) return true;
+      if (_scanCache && _scanCache.navInside.has(cur)) {
+        found = _scanCache.navInside.get(cur);
+        break;
+      }
+      chain.push(cur);
+      if (isNavPanelContainer(cur)) {
+        found = true;
+        break;
+      }
       cur = cur.parentElement;
     }
-    return false;
+    if (_scanCache) {
+      if (found && chain.length > 0) {
+        // Chỉ nút chạm nav (cuối chain) và con cháu phía dưới nó chắc chắn nằm trong nav
+        for (const n of chain) _scanCache.navInside.set(n, true);
+      } else {
+        for (const n of chain) _scanCache.navInside.set(n, false);
+      }
+    }
+    return found;
   }
 
   // =========================================================================
@@ -779,16 +855,17 @@
       }
     }
 
-    // Chiến lược B: Tìm nút Đúng/Đ và Sai/S dạng div/flex/card (không giới hạn r.top < 40)
+    // Chiến lược B: Lọc chuỗi ngắn trước khi kiểm tra Nav/Style/Rect để đạt O(1) reflow
     const leafCandidates = Array.from(root.querySelectorAll?.("button, label, span, div, td") || []).filter((el) => {
-      if (isInsideNavOrChrome(el) || isHiddenElement(el)) return false;
+      const childLen = el.children?.length || 0;
+      const tag = (el.tagName || "").toLowerCase();
+      if (childLen > 0 && !((tag === "button" || tag === "label") && childLen <= 2)) return false;
+      const txt = getFastText(el).trim();
+      if (txt.length === 0 || txt.length > 6 || !/^(Đúng|Sai|Đ|S)$/i.test(txt)) return false;
+      if (isHiddenElement(el) || isInsideNavOrChrome(el)) return false;
       if (closestMatching(el, (n) => /^(thead|th)$/i.test(n.tagName || ""))) return false;
       const r = getEffectiveRect(el);
-      if (r.width < 12 || r.height < 12 || r.width > 220) return false;
-      const txt = getText(el).trim();
-      if (!/^(Đúng|Sai|Đ|S)$/i.test(txt)) return false;
-      const tag = (el.tagName || "").toLowerCase();
-      return (el.children?.length || 0) === 0 || ((tag === "button" || tag === "label") && (el.children?.length || 0) <= 2);
+      return r.width >= 12 && r.height >= 12 && r.width <= 220;
     });
 
     const tBtnsRaw = dedupeNestedControls(leafCandidates.filter((e) => /^(Đúng|Đ)$/i.test(getText(e).trim())));
@@ -981,7 +1058,7 @@
     });
   }
 
-  function scoreAndBuildMCQ(badges, rows, rects, isBadgeTier) {
+  function scoreAndBuildMCQ(badges, rows, rects, isBadgeTier, rowTextCache = null) {
     const letters = ["A", "B", "C", "D"];
     let score = 0;
 
@@ -995,7 +1072,17 @@
       score += 20;
     }
 
-    const texts = rows.map((r, i) => sanitizeChoiceText(serializeAcademicDOM(r), letters[i]));
+    const texts = rows.map((r, i) => {
+      let cached = rowTextCache ? rowTextCache.get(r) : null;
+      if (!cached) {
+        cached = {
+          serialized: serializeAcademicDOM(r),
+          plain: getFastText(r).trim()
+        };
+        if (rowTextCache) rowTextCache.set(r, cached);
+      }
+      return sanitizeChoiceText(cached.serialized, letters[i]);
+    });
     const nonEmpty = texts.filter((t) => t.length > 0).length;
 
     if (
@@ -1004,7 +1091,7 @@
       badges.some(
         (b) =>
           !/^(button|label)$/i.test(b.tagName || "") &&
-          getText(b.parentElement).trim().length > 20 &&
+          getFastText(b.parentElement).trim().length > 20 &&
           !b.parentElement?.querySelector?.('input, [role="radio"]')
       )
     ) {
@@ -1014,8 +1101,8 @@
     for (let i = 0; i < 4; i++) {
       const rr = getEffectiveRect(rows[i]);
       const br = rects[i];
-      const rowTxt = getText(rows[i]).trim();
-      const bTxt = getText(badges[i]).trim();
+      const rowTxt = rowTextCache ? rowTextCache.get(rows[i]).plain : getFastText(rows[i]).trim();
+      const bTxt = getFastText(badges[i]).trim();
 
       if (isBadgeTier) {
         if (rr.width === 0 || br.left - rr.left <= 120) score += 15;
@@ -1042,23 +1129,39 @@
     };
   }
 
+  function isInsideMathContainer(el) {
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      const tag = (cur.tagName || "").toLowerCase();
+      if (tag === "mjx-container") return true;
+      const cls = String(cur.className || "");
+      if (/\b(katex|MathJax)\b/i.test(cls)) return true;
+      if (tag === "body" || tag === "html") break;
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
   function findMCQ(root = document, _ignoreTop = true) {
-    // TẦNG 1: Tìm nhãn A, B, C, D dạng badge hoặc inline tag riêng (kể cả ngoài viewport)
+    // TẦNG 1: Lọc nhanh text A/B/C/D trước khi kiểm tra math/nav/hidden/rect
     const map = { A: [], B: [], C: [], D: [] };
     const nodes = root.querySelectorAll?.("span, div, b, strong, label, button, p") || [];
 
     for (const el of nodes) {
-      if (isInsideNavOrChrome(el) || isHiddenElement(el)) continue;
       if (el.children && el.children.length > 2) continue;
-      const raw = getText(el).trim();
+      const raw = getFastText(el).trim();
+      if (raw.length === 0 || raw.length > 5) continue;
       const m = raw.match(/^\(?([A-D])\)?[\.\)\:]?$/);
       if (!m) continue;
+      if (isInsideMathContainer(el) || isHiddenElement(el) || isInsideNavOrChrome(el)) continue;
       const r = getEffectiveRect(el);
       if (r.width < 6 || r.height < 10 || r.width > 115 || r.height > 90) {
         continue;
       }
       map[m[1]].push(el);
     }
+
+    const rowTextCache = new WeakMap();
 
     if (map.A.length && map.B.length && map.C.length && map.D.length) {
       const lim = (arr) => (arr.length <= 8 ? arr : [...arr.slice(0, 5), ...arr.slice(-3)]);
@@ -1090,7 +1193,7 @@
                 continue;
               }
 
-              const scored = scoreAndBuildMCQ(badges, rows, rects, true);
+              const scored = scoreAndBuildMCQ(badges, rows, rects, true, rowTextCache);
               if (scored && scored.score > bestScore) {
                 bestScore = scored.score;
                 bestChoiceSet = scored.choices;
@@ -1102,23 +1205,23 @@
       if (bestChoiceSet && bestChoiceSet.length === 4) return bestChoiceSet;
     }
 
-    // TẦNG 2: Khối đáp án viết liền "A. Nội dung"
+    // TẦNG 2: Khối đáp án viết liền "A. Nội dung" — lọc text prefix trước khi kiểm tra layout
     const inlineOptMap = { A: [], B: [], C: [], D: [] };
     const INLINE_OPT_RE = /^\(?([A-D])\)?[\.\)\:]\s+\S/;
     const rowCandidates = Array.from(root.querySelectorAll?.("div, label, li, button, p, td, span") || []);
     const matchedInline = rowCandidates.filter((el) => {
-      if (isInsideNavOrChrome(el) || isHiddenElement(el)) return false;
+      const txt = getFastText(el).trim();
+      if (txt.length < 3 || txt.length > 1200 || !INLINE_OPT_RE.test(txt)) return false;
+      if (isHiddenElement(el) || isInsideNavOrChrome(el)) return false;
       const r = getEffectiveRect(el);
-      if (r.width < 20 || r.height < 12 || r.height > 420) return false;
-      const txt = getText(el).trim();
-      return INLINE_OPT_RE.test(txt);
+      return r.width >= 20 && r.height >= 12 && r.height <= 420;
     });
 
     const leafInline = matchedInline.filter(
       (el) => !matchedInline.some((other) => other !== el && typeof el.contains === "function" && el.contains(other))
     );
     for (const el of leafInline) {
-      const m = getText(el).trim().match(INLINE_OPT_RE);
+      const m = getFastText(el).trim().match(INLINE_OPT_RE);
       if (m) inlineOptMap[m[1]].push(el);
     }
 
@@ -1133,7 +1236,7 @@
               const rows = [rA, rB, rC, rD];
               const rects = rows.map(getEffectiveRect);
               if (!isValidReadingOrder(rects)) continue;
-              const scored = scoreAndBuildMCQ(rows, rows, rects, false);
+              const scored = scoreAndBuildMCQ(rows, rows, rects, false, rowTextCache);
               if (scored && scored.score > bestScore) {
                 bestScore = scored.score;
                 bestSet = scored.choices;
@@ -1826,18 +1929,14 @@
 
     const nodes = root.querySelectorAll?.("b, strong, span, div, p, h1, h2, h3, h4, h5") || [];
     for (const el of nodes) {
-      if (isInsideNavOrChrome(el) || isHiddenElement(el)) continue;
-      const r = getEffectiveRect(el);
-      if (r.width === 0 || r.height === 0) continue;
-
-      const txt = getText(el).trim();
-      if (!txt || txt.length > 1500) continue;
+      const txt = getFastText(el).trim();
+      if (txt.length < 5 || txt.length > 1500 || !/^(?:Câu|Question)/i.test(txt)) continue;
 
       let m = txt.match(HEADER_EXACT_RE);
       if (!m && HEADER_PREFIX_RE.test(txt)) {
         const descendants = Array.from(el.querySelectorAll?.("b, strong, span, div, p, h1, h2, h3, h4, h5") || []);
         const childHasHeader = descendants.some(
-          (ch) => HEADER_PREFIX_RE.test(getText(ch).trim()) || HEADER_EXACT_RE.test(getText(ch).trim())
+          (ch) => HEADER_PREFIX_RE.test(getFastText(ch).trim()) || HEADER_EXACT_RE.test(getFastText(ch).trim())
         );
         if (!childHasHeader) {
           m = txt.match(HEADER_PREFIX_RE);
@@ -1845,6 +1944,9 @@
       }
 
       if (m) {
+        if (isHiddenElement(el) || isInsideNavOrChrome(el)) continue;
+        const r = getEffectiveRect(el);
+        if (r.width === 0 || r.height === 0) continue;
         const n = parseInt(m[1], 10);
         if (n >= 1 && n <= 200 && !map.has(n)) {
           map.set(n, el);
@@ -1880,6 +1982,8 @@
   }
 
   const api = {
+    beginScanCache,
+    endScanCache,
     mathMLToLatex,
     serializeAcademicDOM,
     getEffectiveRect,

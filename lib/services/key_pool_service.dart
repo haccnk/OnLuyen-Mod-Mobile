@@ -46,7 +46,7 @@ class KeySlot {
 }
 
 class KeyPoolService {
-  static const int perKeyMinIntervalMs = 1800;
+  static const int perKeyMinIntervalMs = 600;
   static const int cooldown429DefaultMs = 20000;
   static const int cooldownTimeoutMs = 5000;
   static const int cooldownServerErrMs = 4000;
