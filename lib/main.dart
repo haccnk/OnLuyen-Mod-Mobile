@@ -22,7 +22,7 @@ class OnLuyenModApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'OnLuyen Mod Mobile',
+      title: 'OnLuyen',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.buildDarkTheme(),
       home: WebViewModScreen(controller: controller),

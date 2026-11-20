@@ -39,6 +39,7 @@ class _WebViewModScreenState extends State<WebViewModScreen> {
     final msg = widget.controller.completionBannerMessage;
     if (msg != null && mounted) {
       widget.controller.clearCompletionBanner();
+      if (!widget.controller.state.enabled) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(msg),
@@ -170,7 +171,7 @@ class _WebViewModScreenState extends State<WebViewModScreen> {
         }
       },
       child: Scaffold(
-        backgroundColor: AppTheme.bgDeep,
+        backgroundColor: Colors.white,
         body: SafeArea(
           child: ListenableBuilder(
             listenable: widget.controller,

@@ -12,6 +12,7 @@ class StorageService {
   static const _kEnabled = 'onluyen_mod_enabled_v1';
   static const _kAutoAdvance = 'onluyen_mod_auto_advance_v1';
   static const _kDesktopMode = 'onluyen_mod_desktop_mode_v1';
+  static const _kStealthMode = 'onluyen_mod_stealth_mode_v1';
   static const _kMode = 'onluyen_mod_intelligence_mode_v1';
   static const _kHistory = 'onluyen_mod_quiz_history_v1';
   static const int maxHistoryItems = 300;
@@ -79,12 +80,22 @@ class StorageService {
 
   Future<bool> loadEnabled() async {
     final prefs = await _ensurePrefs();
-    return prefs.getBool(_kEnabled) ?? true;
+    return prefs.getBool(_kEnabled) ?? false;
   }
 
   Future<void> saveEnabled(bool value) async {
     final prefs = await _ensurePrefs();
     await prefs.setBool(_kEnabled, value);
+  }
+
+  Future<bool> loadStealthMode() async {
+    final prefs = await _ensurePrefs();
+    return prefs.getBool(_kStealthMode) ?? false;
+  }
+
+  Future<void> saveStealthMode(bool value) async {
+    final prefs = await _ensurePrefs();
+    await prefs.setBool(_kStealthMode, value);
   }
 
   Future<bool> loadAutoAdvance() async {

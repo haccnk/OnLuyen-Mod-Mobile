@@ -731,6 +731,10 @@ test("20. mobile_agent.js: scrollIntoView + Post-Click Verification 250ms tự c
   listEnv.doc.body.appendChild(b1);
   listEnv.doc.body.appendChild(b2);
 
+  // Kiểm tra mặc định tắt Mod (app OnLuyen bình thường) khi khởi tạo, sau đó bật Mod để test List Mode
+  assert.strictEqual(listLoaded.AGENT.getDiagnostics().isExtensionEnabled, false, "Mặc định Mod phải tắt để dùng như app thường");
+  listLoaded.AGENT.updateConfig({ autoSolverEnabled: true });
+
   await listLoaded.AGENT.forceScanNow();
   // Chờ đủ cho 3 lần fail của Câu 1 + giải xong Câu 2
   for (let i = 0; i < 35; i++) {

@@ -276,6 +276,7 @@ class SolverUiState {
   final bool enabled;
   final bool autoAdvance;
   final bool desktopMode;
+  final bool stealthMode;
   final IntelligenceMode mode;
   final PillVisualState pillState;
   final String statusText;
@@ -285,12 +286,13 @@ class SolverUiState {
   final bool hasKeys;
 
   const SolverUiState({
-    this.enabled = true,
+    this.enabled = false,
     this.autoAdvance = true,
     this.desktopMode = false,
+    this.stealthMode = false,
     this.mode = IntelligenceMode.smart,
-    this.pillState = PillVisualState.noKey,
-    this.statusText = 'Chưa có API Key — chạm để cài đặt',
+    this.pillState = PillVisualState.paused,
+    this.statusText = 'Chế độ bình thường (Mod đang tắt)',
     this.lastAnswer = '',
     this.lastMeta,
     this.activeKeyCount = 0,
@@ -301,6 +303,7 @@ class SolverUiState {
     bool? enabled,
     bool? autoAdvance,
     bool? desktopMode,
+    bool? stealthMode,
     IntelligenceMode? mode,
     PillVisualState? pillState,
     String? statusText,
@@ -314,6 +317,7 @@ class SolverUiState {
       enabled: enabled ?? this.enabled,
       autoAdvance: autoAdvance ?? this.autoAdvance,
       desktopMode: desktopMode ?? this.desktopMode,
+      stealthMode: stealthMode ?? this.stealthMode,
       mode: mode ?? this.mode,
       pillState: pillState ?? this.pillState,
       statusText: statusText ?? this.statusText,

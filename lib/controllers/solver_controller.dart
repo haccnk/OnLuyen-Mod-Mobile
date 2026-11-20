@@ -83,24 +83,25 @@ class SolverController extends ChangeNotifier {
     final enabled = await storage.loadEnabled();
     final autoAdvance = await storage.loadAutoAdvance();
     final desktopMode = await storage.loadDesktopMode();
+    final stealthMode = await storage.loadStealthMode();
     final mode = await storage.loadIntelligenceMode();
 
     final activeCount = enabledKeyStrings.length;
     final hasAnyKeys = activeCount > 0;
 
+    final effectiveEnabled = enabled && hasAnyKeys;
     _state = _state.copyWith(
-      enabled: enabled,
+      enabled: effectiveEnabled,
       autoAdvance: autoAdvance,
       desktopMode: desktopMode,
+      stealthMode: stealthMode,
       mode: mode,
       activeKeyCount: activeCount,
       hasKeys: hasAnyKeys,
-      pillState: !hasAnyKeys
-          ? PillVisualState.noKey
-          : (enabled ? PillVisualState.idle : PillVisualState.paused),
-      statusText: !hasAnyKeys
-          ? 'Chưa có API Key — chạm để thêm Key'
-          : (enabled ? 'Sẵn sàng quét trên OnLuyen' : 'Đang tạm tắt tự động giải'),
+      pillState: effectiveEnabled ? PillVisualState.idle : PillVisualState.paused,
+      statusText: effectiveEnabled
+          ? 'Sẵn sàng quét trên OnLuyen ($activeCount Key)'
+          : 'Chế độ bình thường (Mod đang tắt)',
     );
     notifyListeners();
   }
@@ -398,18 +399,46 @@ class SolverController extends ChangeNotifier {
 
   Future<void> toggleEnabled([bool? forceValue]) async {
     final next = forceValue ?? !_state.enabled;
+    if (next && !_state.hasKeys) {
+      await storage.saveEnabled(false);
+      _state = _state.copyWith(
+        enabled: false,
+        pillState: PillVisualState.noKey,
+        statusText: 'Vui lòng thêm Gemini API Key trước khi bật tự động giải.',
+      );
+      notifyListeners();
+      await _pushConfigToWebView();
+      return;
+    }
+
     await storage.saveEnabled(next);
     _state = _state.copyWith(
       enabled: next,
-      pillState: !_state.hasKeys
-          ? PillVisualState.noKey
-          : (next ? PillVisualState.idle : PillVisualState.paused),
-      statusText: !_state.hasKeys
-          ? 'Chưa có API Key — chạm để thêm Key'
-          : (next ? 'Đã bật tự động giải' : 'Đã tạm tắt tự động giải'),
+      pillState: next ? PillVisualState.idle : PillVisualState.paused,
+      statusText: next
+          ? 'Đã bật tự động giải (${_state.activeKeyCount} Key)'
+          : 'Chế độ bình thường (Mod đang tắt)',
     );
     notifyListeners();
     await _pushConfigToWebView();
+  }
+
+  Future<void> hideAndDisableMod() async {
+    await storage.saveEnabled(false);
+    _state = _state.copyWith(
+      enabled: false,
+      pillState: PillVisualState.paused,
+      statusText: 'Chế độ bình thường (Mod đang tắt)',
+    );
+    notifyListeners();
+    await _pushConfigToWebView();
+  }
+
+  Future<void> toggleStealthMode([bool? forceValue]) async {
+    final next = forceValue ?? !_state.stealthMode;
+    await storage.saveStealthMode(next);
+    _state = _state.copyWith(stealthMode: next);
+    notifyListeners();
   }
 
   Future<void> toggleAutoAdvance([bool? forceValue]) async {
@@ -445,10 +474,13 @@ class SolverController extends ChangeNotifier {
     if (!_state.hasKeys) {
       _state = _state.copyWith(
         pillState: PillVisualState.noKey,
-        statusText: 'Chưa có API Key — hãy thêm Key trước khi quét!',
+        statusText: 'Vui lòng thêm Gemini API Key trước khi quét!',
       );
       notifyListeners();
       return;
+    }
+    if (!_state.enabled) {
+      await toggleEnabled(true);
     }
     _state = _state.copyWith(
       pillState: PillVisualState.scanning,
@@ -463,6 +495,14 @@ class SolverController extends ChangeNotifier {
   Future<void> retryQuestion(int? targetQuestionNumber) async {
     final ctrl = _webViewController;
     if (ctrl == null) return;
+    if (!_state.hasKeys) {
+      _state = _state.copyWith(
+        pillState: PillVisualState.noKey,
+        statusText: 'Vui lòng thêm Gemini API Key trước khi giải lại!',
+      );
+      notifyListeners();
+      return;
+    }
     final arg = targetQuestionNumber == null ? 'null' : targetQuestionNumber.toString();
     _state = _state.copyWith(
       pillState: PillVisualState.scanning,
@@ -526,17 +566,20 @@ class SolverController extends ChangeNotifier {
     await storage.saveApiKeys(updated);
     final activeCount = enabledKeyStrings.length;
     final hasAny = activeCount > 0;
+    final effectiveEnabled = _state.enabled && hasAny;
     _state = _state.copyWith(
+      enabled: effectiveEnabled,
       activeKeyCount: activeCount,
       hasKeys: hasAny,
-      pillState: !hasAny
-          ? PillVisualState.noKey
-          : (_state.enabled ? PillVisualState.idle : PillVisualState.paused),
-      statusText: !hasAny
-          ? 'Chưa có API Key — chạm để thêm Key'
-          : 'Sẵn sàng ($activeCount Key đang bật)',
+      pillState: effectiveEnabled ? PillVisualState.idle : PillVisualState.paused,
+      statusText: effectiveEnabled
+          ? 'Sẵn sàng ($activeCount Key đang bật)'
+          : (hasAny
+              ? 'Chế độ bình thường ($activeCount Key sẵn sàng)'
+              : 'Chế độ bình thường (Mod đang tắt)'),
     );
     notifyListeners();
+    await _pushConfigToWebView();
   }
 
   Future<void> clearCooldowns() async {

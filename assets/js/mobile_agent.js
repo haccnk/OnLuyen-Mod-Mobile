@@ -15,7 +15,7 @@
   let isProcessing = false;
   let solvedSignature = "";
   let debounceTimer = null;
-  let isExtensionEnabled = true;
+  let isExtensionEnabled = false;
   let autoAdvanceEnabled = true;
   let intelligenceMode = "smart";
   let domObserver = null;

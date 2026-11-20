@@ -1,12 +1,12 @@
 # OnLuyen Mod Mobile v1.0 (Android & iOS)
 
-Ứng dụng di động **OnLuyen Mod Mobile v1.0** mở trực tiếp `https://app.onluyen.vn` toàn màn hình trên WebView đã được mod sẵn (giữ trạng thái luôn tập trung, đọc trọn vẹn đề dài ngoài viewport, bóc ảnh 3 lớp và giải bằng bộ não **Multi-Agent 4 Tầng** chạy hoàn toàn trên Native Dart).
+Ứng dụng di động **OnLuyen** được thiết kế **như một app OnLuyen bình thường** (nền sáng sạch sẽ, làm bài và nộp bài thủ công hoàn toàn tự nhiên, không hiện giao diện thừa). Khi cần hỗ trợ, bạn chỉ cần chạm vào **nút kính mờ nhỏ ở góc dưới bên phải** để bật **Mod Menu**.
 
 ---
 
 ## Tải về & Cài đặt (Releases)
 
-Bạn có thể tải trực tiếp file cài đặt đã build sẵn tại trang **GitHub Releases**:
+Tải trực tiếp file cài đặt đã build sẵn tại trang **GitHub Releases**:
 
 - **Trang Releases chính thức**: https://github.com/haccnk/OnLuyen-Mod-Mobile/releases
 - **Bản phát hành v1.0**: https://github.com/haccnk/OnLuyen-Mod-Mobile/releases/tag/v1.0
@@ -16,35 +16,42 @@ Bạn có thể tải trực tiếp file cài đặt đã build sẵn tại tran
 
 ---
 
+## Trải nghiệm Stealth: App bình thường + Mod Menu góc dưới phải
+
+1. **Mặc định như app OnLuyen gốc**:
+   - Tên app hiển thị **`OnLuyen`**, mở thẳng `https://app.onluyen.vn` toàn màn hình.
+   - Chế độ tự động giải **mặc định TẮT** — bạn tự đọc đề, tự làm và tự nộp bài hoàn toàn bình thường, không có thông báo hay banner làm phiền.
+2. **Nút Mod Menu gọn nhẹ ở góc dưới phải**:
+   - **Khi Mod đang TẮT**: Chỉ là một chấm tròn kính mờ `34×34` (không chữ, không phát sáng) ở góc dưới bên phải. Chạm nhẹ để mở **Menu hỗ trợ** (có thể kéo thả sang mép trái/phải tùy tay thuận).
+   - **Khi bật Mod (`Tự động giải: BẬT`)**: Nút chuyển thành chỉ báo trạng thái nhỏ gọn (hiện kết quả ngắn khi chốt). **Nhấn giữ** nút góc dưới phải (hoặc bấm nút 👁️ **Về app thường** trên menu) để tắt nhanh Mod và quay về giao diện app bình thường ngay lập tức.
+   - **Chế độ Tàng hình tối đa** (trong *Tùy chọn nâng cao*): Thu nhỏ nút góc dưới phải thành chấm siêu mờ `8×8` gần như vô hình khi Mod tắt — chạm đúp hoặc nhấn giữ vào góc để mở Mod Menu.
+
+---
+
 ## Hướng dẫn cấu hình API Key & Sử dụng
 
 > **Bảo mật 0% Key lưu cứng**: Toàn bộ mã nguồn không chứa bất kỳ Gemini API Key nào. Key của bạn chỉ được lưu cục bộ trong thiết bị.
 
-1. Mở ứng dụng **OnLuyen Mod** trên điện thoại -> chạm vào **bong bóng nổi `Chưa có Key`**.
-2. Bấm biểu tượng **Chìa khóa (Cài đặt Đa API Key)**.
+1. Mở app -> chạm vào **nút nhỏ ở góc dưới bên phải** để mở **Menu hỗ trợ**.
+2. Bấm biểu tượng **Chìa khóa (`API Key`)**.
 3. Dán **1 hoặc nhiều** Gemini API Key (mỗi key 1 dòng hoặc ngăn cách dấu phẩy), đặt nhãn gợi nhớ -> bấm **Thêm vào bộ xoay vòng**.
 4. Bấm **⚡ Kiểm tra tất cả Key (Test Live)** để kiểm tra trạng thái thực tế (`🟢 Sống` + độ trễ `ms`, `🟡 429` hoặc `🔴 Lỗi`) trên `gemini-3.1-flash-lite` và `gemini-3-flash-preview`.
-5. Quay lại màn hình chính, đăng nhập tài khoản OnLuyen và mở bài tập — bong bóng nổi sẽ tự quét và tích đáp án.
-   - **Chạm nhẹ bong bóng**: Mở bảng điều khiển (`Fast / Smart / Ultra`, Quét ngay, Giải lại câu hiện tại hoặc nhập số câu, đổi Mobile/Desktop WebView, xem Lịch sử và xuất/chia sẻ `.txt`).
-   - **Nhấn giữ bong bóng**: Bật / Tắt nhanh chế độ tự động giải.
+5. Quay lại làm bài — khi nào muốn app tự giải thì mở Menu góc dưới phải và gạt **Tự động giải** sang BẬT (hoặc bấm **Quét ngay**).
 
 ---
 
-## Kiến trúc chính
+## Công nghệ bên trong (chỉ chạy khi bật Mod)
 
-- **WebView Mod (`flutter_inappwebview`)**:
-  - Tiêm `assets/js/inject.js` tại `AT_DOCUMENT_START` (chặn `blur`, `visibilitychange`, `focusout`, `mouseleave`, giữ `document.hidden = false`).
-  - Tiêm `assets/js/dom_extractor_mobile.js` + `assets/js/mobile_agent.js` tại `AT_DOCUMENT_END`.
-  - User-Agent sạch (loại bỏ `; wv)` của Android WebView) + bật `CookieManager` & popup OAuth để đăng nhập Google ổn định, kèm công tắc đổi nhanh **Mobile / Desktop Mode**.
-- **Đọc đề dài & Xử lý Hình ảnh 3 Lớp**:
-  - Đọc trọn vẹn đề, đoạn văn, 4 mệnh đề Đúng/Sai và 4 đáp án dù bị khuất ngoài màn hình (`top < 0` hoặc `top > viewportHeight`), vá lỗi nhận nhầm khung chính trên màn hình dọc `360–430px`.
-  - Câu chỉ có chữ / LaTeX / `[GẠCH_CHÂN: ...]` chỉ gửi HTML sạch (không chụp ảnh -> tiết kiệm token và cực nhanh).
-  - Câu có hình vẽ / đồ thị / bảng biến thiên tự xử lý 3 lớp: **Lớp 1** bóc ảnh full-res (`<img>` kèm cookie phiên, `<canvas>`, `<svg>` render `2x` PNG) -> **Lớp 2 (`Auto Capture Stage`)** tự ẩn bong bóng nổi và dựng sân khấu phóng lớn nền trắng `#__onluyen_capture_stage` để chụp -> **Lớp 3** cuộn gom đa khung fallback.
-  - Tự `scrollIntoView({ behavior: "instant", block: "center" })` trước khi chọn và kiểm tra lại DOM sau `250ms` (**Post-Click DOM Verification**).
-- **Bộ não AI Multi-Agent 4 Tầng (Native Dart)**:
+- **WebView sạch & Giữ phiên đăng nhập**: User-Agent chuẩn (gỡ `; wv)` của Android WebView), hỗ trợ popup đăng nhập Google OAuth, `AT_DOCUMENT_START` chống mất focus (`inject.js`), kèm công tắc **Mobile / Desktop Mode**.
+- **Đọc đề dài ngoài viewport & Xử lý Hình ảnh 3 Lớp**:
+  - Đọc trọn vẹn đề dài, đoạn văn, 4 mệnh đề Đúng/Sai và 4 đáp án dù bị khuất ngoài màn hình, tối ưu màn hình dọc `360–430px`.
+  - Câu chỉ có chữ / LaTeX / `[GẠCH_CHÂN: ...]` chỉ gửi HTML sạch (không chụp ảnh -> tiết kiệm token).
+  - Câu có hình vẽ / đồ thị / bảng biến thiên tự xử lý 3 lớp: **Lớp 1** bóc ảnh full-res (`<img>` kèm cookie phiên, `<canvas>`, `<svg>` 2x PNG) -> **Lớp 2 (`Auto Capture Stage`)** ẩn tạm nút nổi và dựng sân khấu nền trắng `#__onluyen_capture_stage` để chụp -> **Lớp 3** cuộn gom đa khung fallback.
+  - Tự `scrollIntoView({ behavior: "instant", block: "center" })` và kiểm tra lại DOM sau `250ms` (**Post-Click DOM Verification**).
+- **Bộ não Multi-Agent 4 Tầng (Native Dart)**:
   - **Tầng 0 (`RiskScorer`)**: Chấm điểm độ rắc rối `0–100`.
-  - **Tầng 1 (`Agent 1` + `ConsistencyChecker`)**: Tự giải chuyên sâu theo chuẩn GDPT 2018 + tự kiểm tra mâu thuẫn nội bộ + lưới cứu hộ `MAX_TOKENS`.
-  - **Tầng 2 (`Agent 2` Cross-Model Auditor)**: Phản biện độc lập bằng model khác với Agent 1 trên các câu rủi ro cao / phân vân / mâu thuẫn / giải lại.
+  - **Tầng 1 (`Agent 1` + `ConsistencyChecker`)**: Giải chuẩn GDPT 2018 + tự kiểm tra mâu thuẫn nội bộ + lưới cứu hộ `MAX_TOKENS`.
+  - **Tầng 2 (`Agent 2` Cross-Model Auditor)**: Phản biện độc lập bằng model khác với Agent 1.
   - **Tầng 3 (`Agent 3` Tie-Breaker Trọng tài)**: Phân xử khi Agent 1 và Agent 2 cho đáp án khác nhau.
 
 ---
