@@ -1,4 +1,7 @@
 (() => {
+  const host = (window.location.hostname || "").toLowerCase();
+  if (host && !host.endsWith("app.onluyen.vn")) return;
+
   if (window.__onluyenModInjected) return;
   window.__onluyenModInjected = true;
 
@@ -18,7 +21,16 @@
     Document.prototype.hasFocus = () => true;
   } catch (e) {}
 
+  const isAuthRoute = () => {
+    const p = ((window.location.pathname || "") + (window.location.hash || "")).toLowerCase();
+    return /\/(login|sign-in|auth)(\/|\?|#|$)/i.test(p);
+  };
+
   const stopEvent = (e) => {
+    if (isAuthRoute()) return;
+    if ((e.type === "blur" || e.type === "focusout") && e.target !== window && e.target !== document) {
+      return;
+    }
     try {
       e.stopImmediatePropagation();
       e.stopPropagation();

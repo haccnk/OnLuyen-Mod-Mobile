@@ -160,6 +160,31 @@ class _WebViewModScreenState extends State<WebViewModScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final webViewChild = !_scriptsLoaded
+        ? const Center(
+            child: CircularProgressIndicator(color: AppTheme.skyAccent),
+          )
+        : InAppWebView(
+            initialUrlRequest: URLRequest(
+              url: WebUri(SolverController.targetUrl),
+            ),
+            initialSettings: widget.controller.buildWebViewSettings(),
+            initialUserScripts: _userScripts,
+            onWebViewCreated: (ctrl) {
+              widget.controller.attachWebViewController(ctrl);
+            },
+            onCreateWindow: _handleOAuthPopup,
+            onLoadStart: (_, url) {
+              widget.controller.updateNavigationProgress(0.1, url?.toString());
+            },
+            onProgressChanged: (_, p) {
+              widget.controller.updateNavigationProgress(p / 100.0, null);
+            },
+            onLoadStop: (_, url) {
+              widget.controller.updateNavigationProgress(1.0, url?.toString());
+            },
+          );
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
@@ -170,64 +195,42 @@ class _WebViewModScreenState extends State<WebViewModScreen> {
           navigator.pop();
         }
       },
-      child: Scaffold(
-        backgroundColor: Colors.white,
-        body: SafeArea(
-          child: ListenableBuilder(
-            listenable: widget.controller,
-            builder: (context, _) {
-              final progress = widget.controller.pageProgress;
-              final showPill = widget.controller.isPillVisibleForCapture;
+      child: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: SystemUiOverlayStyle.dark.copyWith(statusBarColor: Colors.white),
+        child: Scaffold(
+          backgroundColor: Colors.white,
+          body: SafeArea(
+            child: ListenableBuilder(
+              listenable: widget.controller,
+              child: webViewChild,
+              builder: (context, child) {
+                final progress = widget.controller.pageProgress;
+                final showPill = widget.controller.isPillVisibleForCapture;
 
-              return Stack(
-                children: [
-                  if (!_scriptsLoaded)
-                    const Center(
-                      child: CircularProgressIndicator(color: AppTheme.skyAccent),
-                    )
-                  else
-                    InAppWebView(
-                      initialUrlRequest: URLRequest(
-                        url: WebUri(SolverController.targetUrl),
+                return Stack(
+                  children: [
+                    if (child != null) child,
+                    if (progress > 0.0 && progress < 1.0)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: LinearProgressIndicator(
+                          value: progress,
+                          minHeight: 2.5,
+                          backgroundColor: Colors.transparent,
+                          valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.skyAccent),
+                        ),
                       ),
-                      initialSettings: widget.controller.buildWebViewSettings(),
-                      initialUserScripts: _userScripts,
-                      onWebViewCreated: (ctrl) {
-                        widget.controller.attachWebViewController(ctrl);
-                      },
-                      onCreateWindow: _handleOAuthPopup,
-                      onLoadStart: (_, url) {
-                        widget.controller.updateNavigationProgress(0.1, url?.toString());
-                      },
-                      onProgressChanged: (_, p) {
-                        widget.controller.updateNavigationProgress(p / 100.0, null);
-                      },
-                      onLoadStop: (_, url) {
-                        widget.controller.updateNavigationProgress(1.0, url?.toString());
-                      },
-                    ),
-                  if (progress > 0.0 && progress < 1.0)
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: LinearProgressIndicator(
-                        value: progress,
-                        minHeight: 2.5,
-                        backgroundColor: Colors.transparent,
-                        valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.skyAccent),
-                      ),
-                    ),
-                  Offstage(
-                    offstage: !showPill,
-                    child: FloatingSolverPill(
+                    FloatingSolverPill(
                       controller: widget.controller,
+                      visible: showPill,
                       onTap: _openControlSheet,
                     ),
-                  ),
-                ],
-              );
-            },
+                  ],
+                );
+              },
+            ),
           ),
         ),
       ),

@@ -1,5 +1,3 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -10,11 +8,13 @@ import '../theme/app_theme.dart';
 class FloatingSolverPill extends StatefulWidget {
   final SolverController controller;
   final VoidCallback onTap;
+  final bool visible;
 
   const FloatingSolverPill({
     super.key,
     required this.controller,
     required this.onTap,
+    this.visible = true,
   });
 
   @override
@@ -65,39 +65,42 @@ class _FloatingSolverPillState extends State<FloatingSolverPill> {
       curve: Curves.easeOutCubic,
       left: targetLeft,
       top: clampedTop,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: (!isModActive && uiState.stealthMode) ? null : widget.onTap,
-        onDoubleTap: (!isModActive && uiState.stealthMode) ? widget.onTap : null,
-        onLongPress: () {
-          HapticFeedback.mediumImpact();
-          if (isModActive) {
-            widget.controller.hideAndDisableMod();
-          } else {
-            widget.onTap();
-          }
-        },
-        onPanStart: (_) {
-          setState(() {
-            _isDragging = true;
-            _top ??= defaultBottomTop;
-            _dragLeft = _dockRight ? size.width - widgetWidth - edgeMargin : edgeMargin;
-          });
-        },
-        onPanUpdate: (details) {
-          setState(() {
-            _top = ((_top ?? defaultBottomTop) + details.delta.dy).clamp(minTop, maxTop);
-            _dragLeft = (_dragLeft + details.delta.dx).clamp(edgeMargin, size.width - widgetWidth - edgeMargin);
-          });
-        },
-        onPanEnd: (_) {
-          final centerX = _dragLeft + widgetWidth / 2;
-          setState(() {
-            _isDragging = false;
-            _dockRight = centerX >= size.width / 2;
-          });
-        },
-        child: _buildTriggerVisual(uiState, widgetWidth, widgetHeight, showCompactAnsChip, ansChip),
+      child: Offstage(
+        offstage: !widget.visible,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: (!isModActive && uiState.stealthMode) ? null : widget.onTap,
+          onDoubleTap: (!isModActive && uiState.stealthMode) ? widget.onTap : null,
+          onLongPress: () {
+            HapticFeedback.mediumImpact();
+            if (isModActive) {
+              widget.controller.hideAndDisableMod();
+            } else {
+              widget.onTap();
+            }
+          },
+          onPanStart: (_) {
+            setState(() {
+              _isDragging = true;
+              _top ??= defaultBottomTop;
+              _dragLeft = _dockRight ? size.width - widgetWidth - edgeMargin : edgeMargin;
+            });
+          },
+          onPanUpdate: (details) {
+            setState(() {
+              _top = ((_top ?? defaultBottomTop) + details.delta.dy).clamp(minTop, maxTop);
+              _dragLeft = (_dragLeft + details.delta.dx).clamp(edgeMargin, size.width - widgetWidth - edgeMargin);
+            });
+          },
+          onPanEnd: (_) {
+            final centerX = _dragLeft + widgetWidth / 2;
+            setState(() {
+              _isDragging = false;
+              _dockRight = centerX >= size.width / 2;
+            });
+          },
+          child: _buildTriggerVisual(uiState, widgetWidth, widgetHeight, showCompactAnsChip, ansChip),
+        ),
       ),
     );
   }
@@ -129,28 +132,23 @@ class _FloatingSolverPillState extends State<FloatingSolverPill> {
       );
     }
 
-    // 2. Mặc định (Mod tắt): Nút tròn kính mờ nhỏ gọn, không chữ, không phát sáng
+    // 2. Mặc định (Mod tắt): Nút tròn nhỏ gọn translucent, không BackdropFilter, không chữ
     if (!uiState.enabled) {
-      return ClipOval(
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-          child: Container(
-            width: width,
-            height: height,
-            decoration: BoxDecoration(
-              color: AppTheme.withAlphaHex(AppTheme.bgSurface, 105),
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: AppTheme.withAlphaHex(AppTheme.textSecondary, 75),
-                width: 1,
-              ),
-            ),
-            child: Icon(
-              Icons.tune_rounded,
-              size: 16,
-              color: AppTheme.withAlphaHex(AppTheme.textPrimary, 190),
-            ),
+      return Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: AppTheme.withAlphaHex(AppTheme.bgSurface, 130),
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: AppTheme.withAlphaHex(AppTheme.textSecondary, 90),
+            width: 1,
           ),
+        ),
+        child: Icon(
+          Icons.tune_rounded,
+          size: 16,
+          color: AppTheme.withAlphaHex(AppTheme.textPrimary, 215),
         ),
       );
     }
@@ -158,87 +156,76 @@ class _FloatingSolverPillState extends State<FloatingSolverPill> {
     // 3. Mod đang bật: Chỉ báo tối giản góc màn hình
     final appearance = _resolveActiveAppearance(uiState);
     if (showCompactAnsChip) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(18),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-          child: Container(
-            width: width,
-            height: height,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            decoration: BoxDecoration(
-              color: AppTheme.withAlphaHex(AppTheme.bgDeep, 210),
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(
-                color: AppTheme.withAlphaHex(appearance.accent, 175),
-                width: 1.2,
+      return Container(
+        width: width,
+        height: height,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: AppTheme.withAlphaHex(AppTheme.bgDeep, 224),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: AppTheme.withAlphaHex(appearance.accent, 185),
+            width: 1.2,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 7,
+              height: 7,
+              decoration: BoxDecoration(
+                color: appearance.accent,
+                shape: BoxShape.circle,
               ),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    color: appearance.accent,
-                    shape: BoxShape.circle,
-                  ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                ansChip,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: appearance.accent,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
                 ),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    ansChip,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: appearance.accent,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
+          ],
         ),
       );
     }
 
-    return ClipOval(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-        child: Container(
-          width: width,
-          height: height,
-          decoration: BoxDecoration(
-            color: AppTheme.withAlphaHex(AppTheme.bgDeep, 215),
-            shape: BoxShape.circle,
-            border: Border.all(
-              color: AppTheme.withAlphaHex(appearance.accent, 185),
-              width: 1.3,
-            ),
-          ),
-          child: Center(
-            child: appearance.isBusy
-                ? SizedBox(
-                    width: 15,
-                    height: 15,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(appearance.accent),
-                    ),
-                  )
-                : Container(
-                    width: 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      color: appearance.accent,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-          ),
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        color: AppTheme.withAlphaHex(AppTheme.bgDeep, 224),
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: AppTheme.withAlphaHex(appearance.accent, 190),
+          width: 1.3,
         ),
+      ),
+      child: Center(
+        child: appearance.isBusy
+            ? SizedBox(
+                width: 15,
+                height: 15,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(appearance.accent),
+                ),
+              )
+            : Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: appearance.accent,
+                  shape: BoxShape.circle,
+                ),
+              ),
       ),
     );
   }
