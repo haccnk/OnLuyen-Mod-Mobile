@@ -9,7 +9,7 @@
   ]);
 
   const UI_NOISE_LINE_RE =
-    /^(Nộp bài|Thời gian(?:\s+còn\s+lại)?|Thống kê|Phiếu trả lời|Danh sách câu hỏi|Câu đã làm|Câu chưa làm|Tiếp tục|Trả lời|Quay lại|Đáp án của bạn|Đáp án đúng|Báo cáo|Báo lỗi|Góp ý|Lưu bài|Thoát)$/i;
+    /^(?:\d{1,2}:\d{2}(?::\d{2})?|Nộp bài|Thời gian(?:\s+còn\s+lại)?|Thống kê|Phiếu trả lời|Danh sách câu hỏi|Câu đã làm|Câu chưa làm|Tiếp tục|Trả lời|Quay lại|Đáp án của bạn|Đáp án đúng|Báo cáo|Báo lỗi|Đánh dấu(?:\s+câu\s+hỏi)?|Bỏ đánh dấu|Tạm dừng|Góp ý|Lưu bài|Thoát)$/i;
 
   function getFastText(el) {
     if (!el) return "";
@@ -725,6 +725,28 @@
     }
     if (tag === "aside") {
       return r.width === 0 || isFixedOverlay || r.width <= (isMobile ? vw * 0.62 : Math.max(460, vw * 0.48));
+    }
+
+    if (r.height > 0 && r.height <= 115 && r.top >= -10 && r.top <= 24) {
+      const fastTxt = getFastText(el);
+      const hasQuestionControlOrNum =
+        Boolean(el.querySelector?.('input[type="radio"], table, .katex, mjx-container')) ||
+        /(?:Câu(?:\s+hỏi)?|Question)\s*[:\.\-]?\s*\d+/i.test(fastTxt);
+      if (!hasQuestionControlOrNum) {
+        if (/(header|topbar|top-bar|navbar|nav-bar|exam-header|quiz-header|app-header|app-bar|toolbar)/i.test(clsId)) {
+          return true;
+        }
+        if (r.height <= 85 && r.top <= 16 && /\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(fastTxt)) {
+          const remaining = fastTxt
+            .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, "")
+            .replace(/\b(?:Nộp bài|Thoát|Lưu bài|Thời gian|còn lại|Tạm dừng|Menu)\b/gi, "")
+            .replace(/[^\p{L}\p{N}]+/gu, "")
+            .trim();
+          if (remaining.length <= 24) {
+            return true;
+          }
+        }
+      }
     }
 
     if (/(answer-sheet|question-palette|question-nav|quiz-sidebar|nav-panel|mobile-drawer|ant-drawer)/.test(clsId)) {
@@ -1643,8 +1665,12 @@
     const stemVisuals = [];
     let stemText = serializeAcademicDOM(container, { excludeNodes, collectVisuals: stemVisuals });
     stemText = stemText
+      .replace(/^(?:\d{1,2}:\d{2}(?::\d{2})?\s+)+/g, "")
+      .replace(/(?:^|\n)\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?=\n|$)/g, "\n")
       .replace(/^Câu\s*[:\.\-]?\s*\d+\s*[:\.\-]?\s*/i, "")
+      .replace(/(?:\s*\|\s*(?:Báo lỗi|Báo cáo|Đánh dấu(?:\s+câu\s+hỏi)?|Bỏ đánh dấu))+/gi, "")
       .replace(/Đáp án của bạn\s*/gi, "")
+      .replace(/\n{3,}/g, "\n\n")
       .trim();
 
     if (stemText.length < 6 && scopeRoot === document && document.body) {
@@ -2009,8 +2035,21 @@
 
   function hasExplicitActiveClass(el) {
     if (!el) return false;
-    const cls = String(el.className || "");
-    return /\b(active|selected|checked|is-selected|is-active|ant-radio-checked|ant-radio-wrapper-checked)\b/i.test(cls);
+    const tokens = String(el.className || "").split(/\s+/).filter(Boolean);
+    for (const tok of tokens) {
+      if (/(?:^|[-_])(un|in|de|non|not)(?:[-_])?(active|selected|checked|chosen)/i.test(tok)) {
+        continue;
+      }
+      if (
+        /^(active|selected|checked|chosen|picked|is-active|is-selected|is-checked|is-chosen|ant-radio-checked|ant-radio-wrapper-checked|mat-radio-checked)$/i.test(
+          tok
+        ) ||
+        /(?:^|[-_])(active|selected|checked|chosen)(?:$|[-_])/i.test(tok)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function findUniqueOutlierIndex(sigs) {
@@ -2060,11 +2099,26 @@
       const badgeOutlier = findUniqueOutlierIndex(mcq.map((c) => getStyleSignature(c.badgeEl)));
       if (badgeOutlier !== -1) return mcq[badgeOutlier].letter;
 
-      if (mcq.some((c) => c.badgeEl?.parentElement)) {
-        const badgeParentOutlier = findUniqueOutlierIndex(
-          mcq.map((c) => getStyleSignature(c.badgeEl?.parentElement || c.rowEl))
-        );
-        if (badgeParentOutlier !== -1) return mcq[badgeParentOutlier].letter;
+      const getAncestorWithinRow = (c, depth) => {
+        let cur = c.badgeEl;
+        if (!cur) return null;
+        for (let d = 0; d < depth; d++) {
+          if (!cur || cur === c.rowEl) return null;
+          cur = cur.parentElement;
+        }
+        if (!cur) return null;
+        if (c.rowEl && cur !== c.rowEl && typeof c.rowEl.contains === "function" && !c.rowEl.contains(cur)) {
+          return null;
+        }
+        return cur;
+      };
+
+      for (let depth = 1; depth <= 4; depth++) {
+        const ancestors = mcq.map((c) => getAncestorWithinRow(c, depth));
+        if (ancestors.every(Boolean)) {
+          const depthOutlier = findUniqueOutlierIndex(ancestors.map(getStyleSignature));
+          if (depthOutlier !== -1) return mcq[depthOutlier].letter;
+        }
       }
 
       const rowOutlier = findUniqueOutlierIndex(mcq.map((c) => getStyleSignature(c.rowEl)));

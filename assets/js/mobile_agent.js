@@ -43,6 +43,8 @@
   const skippedFailedListKeys = new Set();
   const failCountMap = new Map();
   const attemptedSingleQuestions = new Set();
+  const solvedSingleFingerprints = new Set();
+  const solvedExplicitQCodes = new Set();
   const clickedNavNums = new Set();
   const rejectedHistoryMap = new Map();
 
@@ -219,36 +221,71 @@
     if (scroll) scrollIfOffScreen(el);
     invalidateBodyTextCache();
     const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 10, top: 10, width: 20, height: 20 };
-    const init = {
+    const cx = (r.left || 0) + Math.max((r.width || 20) / 2, 4);
+    const cy = (r.top || 0) + Math.max((r.height || 20) / 2, 4);
+    const downInit = {
       bubbles: true,
       cancelable: true,
+      composed: true,
       view: globalScope,
-      clientX: (r.left || 0) + Math.min(Math.max((r.width || 20) / 2, 4), 20),
-      clientY: (r.top || 0) + Math.max((r.height || 20) / 2, 4)
+      button: 0,
+      buttons: 1,
+      detail: 1,
+      clientX: cx,
+      clientY: cy
+    };
+    const upInit = {
+      ...downInit,
+      buttons: 0
     };
     try {
       if (typeof globalScope.PointerEvent === "function") {
-        el.dispatchEvent(new globalScope.PointerEvent("pointerdown", { ...init, pointerId: 1, isPrimary: true }));
+        el.dispatchEvent(
+          new globalScope.PointerEvent("pointerdown", {
+            ...downInit,
+            pointerId: 1,
+            isPrimary: true,
+            pointerType: "touch"
+          })
+        );
       }
       if (typeof globalScope.MouseEvent === "function") {
-        el.dispatchEvent(new globalScope.MouseEvent("mousedown", init));
+        el.dispatchEvent(new globalScope.MouseEvent("mousedown", downInit));
       }
       if (typeof globalScope.PointerEvent === "function") {
-        el.dispatchEvent(new globalScope.PointerEvent("pointerup", { ...init, pointerId: 1, isPrimary: true }));
+        el.dispatchEvent(
+          new globalScope.PointerEvent("pointerup", {
+            ...upInit,
+            pointerId: 1,
+            isPrimary: true,
+            pointerType: "touch"
+          })
+        );
       }
       if (typeof globalScope.MouseEvent === "function") {
-        el.dispatchEvent(new globalScope.MouseEvent("mouseup", init));
+        el.dispatchEvent(new globalScope.MouseEvent("mouseup", upInit));
       }
     } catch (e) {}
 
-    if (typeof el.click === "function") {
+    const tag = (el.tagName || "").toLowerCase();
+    const isNativeControl = tag === "input" || tag === "label" || tag === "button" || tag === "a";
+    if (isNativeControl && typeof el.click === "function") {
       el.click();
-    } else {
+      if (tag === "input" && (el.type === "radio" || el.type === "checkbox") && el.checked !== true) {
+        try {
+          el.checked = true;
+          if (typeof globalScope.Event === "function") {
+            el.dispatchEvent(new globalScope.Event("input", { bubbles: true }));
+            el.dispatchEvent(new globalScope.Event("change", { bubbles: true }));
+          }
+        } catch (e) {}
+      }
+    } else if (typeof globalScope.MouseEvent === "function") {
       try {
-        if (typeof globalScope.MouseEvent === "function") {
-          el.dispatchEvent(new globalScope.MouseEvent("click", init));
-        }
+        el.dispatchEvent(new globalScope.MouseEvent("click", upInit));
       } catch (e) {}
+    } else if (typeof el.click === "function") {
+      el.click();
     }
   }
 
@@ -334,11 +371,20 @@
     return findActionButtons(scopeDoc).nextBtn;
   }
 
+  function stripVolatileUiText(raw = "") {
+    return String(raw || "")
+      .replace(/\b\d{1,2}:\d{2}:\d{2}\b/g, " ")
+      .replace(/(?:^|\n)\s*\d{1,2}:\d{2}\s*(?=\n|$)/g, "\n")
+      .replace(/(?:\s*\|\s*(?:Báo lỗi|Báo cáo|Đánh dấu(?:\s+câu\s+hỏi)?|Bỏ đánh dấu))+/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   function computeQuestionFingerprint(type, payload) {
     return [
       type || "",
-      String(payload?.stemText || "").slice(0, 140),
-      String(payload?.extraDetails || "").slice(0, 140),
+      stripVolatileUiText(payload?.stemText || "").slice(0, 140),
+      stripVolatileUiText(payload?.extraDetails || "").slice(0, 140),
       String(payload?.visualSignature || "").slice(0, 60)
     ].join("|");
   }
@@ -467,11 +513,11 @@
     return containsBadge || r.width >= 60;
   }
 
-  function getMcqClickCandidates(c) {
+  function getMcqClickCandidates(c, scopeDoc = globalScope.document) {
     if (!c) return [];
     const out = [];
-    const docBody = globalScope.document?.body;
-    const docHtml = globalScope.document?.documentElement;
+    const docBody = scopeDoc?.body || globalScope.document?.body;
+    const docHtml = scopeDoc?.documentElement || globalScope.document?.documentElement;
     const addUnique = (el) => {
       if (!el || el === docBody || el === docHtml) return;
       if (!out.includes(el)) out.push(el);
@@ -524,10 +570,45 @@
       }
     }
 
-    // 3. badgeEl
+    // 3. Điểm chạm trực quan ngay giữa thẻ c.rowEl qua elementFromPoint
+    if (c.rowEl && typeof scopeDoc?.elementFromPoint === "function" && typeof c.rowEl.getBoundingClientRect === "function") {
+      try {
+        const rr = c.rowEl.getBoundingClientRect();
+        if (rr && rr.width > 0 && rr.height > 0) {
+          const cx = rr.left + rr.width / 2;
+          const cy = rr.top + rr.height / 2;
+          let hit = scopeDoc.elementFromPoint(cx, cy);
+          while (
+            hit &&
+            hit !== c.rowEl &&
+            hit !== docBody &&
+            hit !== docHtml &&
+            typeof c.rowEl.contains === "function" &&
+            c.rowEl.contains(hit)
+          ) {
+            const cls = String(hit.className || "");
+            const tag = (hit.tagName || "").toLowerCase();
+            if (!/\b(katex|mjx-)/i.test(cls) && !tag.startsWith("mjx-") && tag !== "math" && tag !== "svg" && tag !== "path") {
+              break;
+            }
+            hit = hit.parentElement;
+          }
+          if (
+            hit &&
+            hit !== docBody &&
+            hit !== docHtml &&
+            (hit === c.rowEl || (typeof c.rowEl.contains === "function" && c.rowEl.contains(hit)))
+          ) {
+            addUnique(hit);
+          }
+        }
+      } catch (e) {}
+    }
+
+    // 4. badgeEl
     if (c.badgeEl) addUnique(c.badgeEl);
 
-    // 4. rowEl và input dự phòng (Antd opacity:0)
+    // 5. rowEl và input dự phòng (Antd opacity:0)
     if (c.rowEl) addUnique(c.rowEl);
     const fallbackInput = c.rowEl?.querySelector?.('input[type="radio"]');
     if (fallbackInput) addUnique(fallbackInput);
@@ -605,11 +686,12 @@
         apply(altVal);
       }
       scheduleManagedTimeout(() => {
-        const detected = EXT.detectUIAns("SHORT_ANSWER", null, inputEl, null);
+        let detected = EXT.detectUIAns("SHORT_ANSWER", null, inputEl, null);
         if (!detected) {
           apply(val);
+          detected = EXT.detectUIAns("SHORT_ANSWER", null, inputEl, null);
         }
-        if (typeof cb === "function") cb();
+        if (typeof cb === "function") cb(Boolean(detected));
       }, POST_CLICK_VERIFY_DELAY_MS, epoch, requireEnabled);
     }, 180, epoch, requireEnabled);
   }
@@ -632,11 +714,68 @@
   // =========================================================================
   // TÍCH ĐÁP ÁN + POST-CLICK VERIFICATION + BẢO VỆ TỰ CHUYỂN CÂU
   // =========================================================================
+  function captureChoiceSnapshot(choice) {
+    const root = choice?.rowEl || choice?.badgeEl;
+    if (!root || root.nodeType !== 1) return "";
+    const parts = [];
+    const queue = [root];
+    const seen = new Set();
+    while (queue.length > 0 && parts.length < 24) {
+      const node = queue.shift();
+      if (!node || node.nodeType !== 1 || seen.has(node)) continue;
+      seen.add(node);
+      const tag = (node.tagName || "").toLowerCase();
+      const cls = String(node.className || "");
+      if (tag.startsWith("mjx-") || /\b(katex|mathjax)\b/i.test(cls)) continue;
+
+      let sig = `${tag}:${cls}`;
+      for (const attr of ["aria-checked", "aria-pressed", "aria-selected", "data-selected", "data-checked", "data-state"]) {
+        const v = node.getAttribute?.(attr);
+        if (v !== null && v !== undefined && v !== "") sig += `|${attr}=${v}`;
+      }
+      if (tag === "input") {
+        sig += `|chk=${Boolean(node.checked)}`;
+      }
+      try {
+        const cs = typeof globalScope.getComputedStyle === "function" ? globalScope.getComputedStyle(node) : node.style;
+        if (cs) {
+          sig += `|${cs.backgroundColor || ""}|${cs.borderColor || cs.borderTopColor || ""}|${cs.color || ""}`;
+        }
+      } catch (e) {}
+      parts.push(sig);
+
+      const kids = node.children || [];
+      for (let i = 0; i < kids.length; i++) {
+        queue.push(kids[i]);
+      }
+    }
+    return parts.join(";");
+  }
+
+  function captureMcqVisualSnapshots(mcq) {
+    if (!Array.isArray(mcq)) return [];
+    return mcq.map((c) => captureChoiceSnapshot(c));
+  }
+
+  function didTargetChoiceChange(beforeSnaps, afterSnaps, targetIdx) {
+    if (!Array.isArray(beforeSnaps) || !Array.isArray(afterSnaps)) return false;
+    if (targetIdx < 0 || targetIdx >= beforeSnaps.length || targetIdx >= afterSnaps.length) return false;
+    if (!beforeSnaps[targetIdx] || !afterSnaps[targetIdx]) return false;
+    if (beforeSnaps[targetIdx] === afterSnaps[targetIdx]) return false;
+    let otherChangedCount = 0;
+    for (let i = 0; i < beforeSnaps.length; i++) {
+      if (i === targetIdx) continue;
+      if (beforeSnaps[i] !== afterSnaps[i]) otherChangedCount += 1;
+    }
+    return otherChangedCount <= 1;
+  }
+
   function applyAnswerToDOM(type, ansStr, answerKind, mcq, shortInp, tf, onDone, opts = {}) {
     const finish = typeof onDone === "function" ? onDone : () => {};
     const epoch = opts.epoch !== undefined ? opts.epoch : null;
     const requireEnabled = opts.requireEnabled !== undefined ? opts.requireEnabled : false;
     const expectedFingerprint = opts.expectedFingerprint || "";
+    const expectedQCode = opts.expectedQCode || "";
     const scopeDoc = opts.scopeDoc || globalScope.document;
 
     if (epoch !== null && !isRunAlive(epoch, requireEnabled)) return;
@@ -644,19 +783,31 @@
     if (type === "MCQ" && ansStr) {
       const idx = ansStr.charCodeAt(0) - 65;
       if (mcq[idx]) {
-        const rawCandidates = getMcqClickCandidates(mcq[idx]);
+        scrollIfOffScreen(mcq[idx].rowEl || mcq[idx].badgeEl);
+        const rawCandidates = getMcqClickCandidates(mcq[idx], scopeDoc);
         const candidates = rawCandidates.length === 1 ? [rawCandidates[0], rawCandidates[0]] : rawCandidates;
+        const preClickFp = expectedFingerprint ? computeLiveQuestionFingerprint(scopeDoc) || expectedFingerprint : "";
+        const beforeSnaps = captureMcqVisualSnapshots(mcq);
+
         const tryCandidate = (candIdx, attemptsSoFar) => {
           const target = candidates[candIdx];
           if (!target) {
-            lastClickInfo = { ans: ansStr, attempts: attemptsSoFar, verified: false, targetTag: "" };
+            lastClickInfo = {
+              ans: ansStr,
+              attempts: attemptsSoFar,
+              verified: false,
+              via: "none",
+              candidateCount: candidates.length,
+              targetTag: "",
+              targetClass: ""
+            };
             finish({ autoAdvanced: false, verified: false });
             return;
           }
           scrollIfOffScreen(mcq[idx].rowEl || target);
           dispatchClick(target, { scroll: false });
           const nextAttempts = attemptsSoFar + 1;
-          const waitDelay = candIdx === 0 ? POST_CLICK_VERIFY_DELAY_MS : 250;
+          const waitDelay = candIdx === 0 ? POST_CLICK_VERIFY_DELAY_MS : 220;
 
           scheduleManagedTimeout(() => {
             const rowEl = mcq[idx].rowEl;
@@ -669,19 +820,30 @@
                 ans: ansStr,
                 attempts: nextAttempts,
                 verified: true,
-                targetTag: target.tagName || ""
+                via: "rowDetached",
+                candidateCount: candidates.length,
+                targetTag: target.tagName || "",
+                targetClass: String(target.className || "").slice(0, 60)
               };
               finish({ autoAdvanced: true, verified: true });
               return;
             }
-            if (expectedFingerprint) {
-              const liveFp = computeLiveQuestionFingerprint(scopeDoc);
-              if (liveFp && liveFp !== expectedFingerprint) {
+            if (preClickFp) {
+              const postClickFp = computeLiveQuestionFingerprint(scopeDoc);
+              const sameExplicitCode = Boolean(
+                expectedQCode &&
+                  /^#\d{5,}$/.test(expectedQCode) &&
+                  getVisibleBodyText(scopeDoc).includes(expectedQCode)
+              );
+              if (postClickFp && postClickFp !== preClickFp && !sameExplicitCode) {
                 lastClickInfo = {
                   ans: ansStr,
                   attempts: nextAttempts,
                   verified: true,
-                  targetTag: target.tagName || ""
+                  via: "fpChanged",
+                  candidateCount: candidates.length,
+                  targetTag: target.tagName || "",
+                  targetClass: String(target.className || "").slice(0, 60)
                 };
                 finish({ autoAdvanced: true, verified: true });
                 return;
@@ -693,12 +855,29 @@
                 ans: ansStr,
                 attempts: nextAttempts,
                 verified: true,
-                targetTag: target.tagName || ""
+                via: "detectUIAns",
+                candidateCount: candidates.length,
+                targetTag: target.tagName || "",
+                targetClass: String(target.className || "").slice(0, 60)
               };
               finish({ autoAdvanced: false, verified: true });
               return;
             }
-            if (candIdx + 1 < Math.min(candidates.length, 3)) {
+            const afterSnaps = captureMcqVisualSnapshots(mcq);
+            if (didTargetChoiceChange(beforeSnaps, afterSnaps, idx)) {
+              lastClickInfo = {
+                ans: ansStr,
+                attempts: nextAttempts,
+                verified: true,
+                via: "snapshotDiff",
+                candidateCount: candidates.length,
+                targetTag: target.tagName || "",
+                targetClass: String(target.className || "").slice(0, 60)
+              };
+              finish({ autoAdvanced: false, verified: true });
+              return;
+            }
+            if (candIdx + 1 < Math.min(candidates.length, 6)) {
               tryCandidate(candIdx + 1, nextAttempts);
               return;
             }
@@ -706,7 +885,10 @@
               ans: ansStr,
               attempts: nextAttempts,
               verified: false,
-              targetTag: target.tagName || ""
+              via: "none",
+              candidateCount: candidates.length,
+              targetTag: target.tagName || "",
+              targetClass: String(target.className || "").slice(0, 60)
             };
             finish({ autoAdvanced: false, verified: false });
           }, waitDelay, epoch, requireEnabled);
@@ -716,20 +898,28 @@
         return;
       }
     } else if (type === "SHORT_ANSWER" && ansStr !== "") {
-      fillInput(shortInp, ansStr, answerKind, () => finish({ autoAdvanced: false }), {
-        epoch,
-        requireEnabled
-      });
+      fillInput(
+        shortInp,
+        ansStr,
+        answerKind,
+        (filledOk) => finish({ autoAdvanced: false, verified: Boolean(filledOk) }),
+        {
+          epoch,
+          requireEnabled
+        }
+      );
       return;
     } else if (type === "TRUE_FALSE" && ansStr.includes("-")) {
       const parts = ansStr.split("-").slice(0, 4);
       const initialUi = EXT.detectUIAns("TRUE_FALSE", null, null, tf);
       const initialParts = initialUi ? initialUi.split("-") : [];
+      const selectedBtns = parts.map((p, idx) => (p === "Đ" ? tf.trueBtns[idx] : tf.falseBtns[idx]));
+      const beforeTfSnaps = selectedBtns.map((b) => (b ? captureChoiceSnapshot({ rowEl: b }) : ""));
       let clickDelay = 0;
       let clickedCount = 0;
 
       parts.forEach((p, idx) => {
-        const btn = p === "Đ" ? tf.trueBtns[idx] : tf.falseBtns[idx];
+        const btn = selectedBtns[idx];
         if (!btn) return;
         const alreadyMatched =
           initialParts[idx] === p ||
@@ -746,15 +936,22 @@
         }, scheduledAt, epoch, requireEnabled);
       });
 
+      const isTfVerified = (verifiedStr) => {
+        if (verifiedStr === parts.join("-")) return true;
+        return selectedBtns.every(
+          (b, i) => !b || (beforeTfSnaps[i] && captureChoiceSnapshot({ rowEl: b }) !== beforeTfSnaps[i])
+        );
+      };
+
       const lastClickAt = clickedCount > 0 ? Math.max(0, clickDelay - 220) : 0;
       scheduleManagedTimeout(() => {
         const verified = EXT.detectUIAns("TRUE_FALSE", null, null, tf);
-        if (verified !== parts.join("-")) {
+        if (!isTfVerified(verified)) {
           const verifiedParts = verified ? verified.split("-") : [];
           let retried = false;
           parts.forEach((p, idx) => {
             if (verifiedParts[idx] !== p) {
-              const btn = p === "Đ" ? tf.trueBtns[idx] : tf.falseBtns[idx];
+              const btn = selectedBtns[idx];
               if (btn) {
                 dispatchClick(btn);
                 retried = true;
@@ -762,16 +959,19 @@
             }
           });
           if (retried) {
-            scheduleManagedTimeout(() => finish({ autoAdvanced: false }), 220, epoch, requireEnabled);
+            scheduleManagedTimeout(() => {
+              const afterRetry = EXT.detectUIAns("TRUE_FALSE", null, null, tf);
+              finish({ autoAdvanced: false, verified: isTfVerified(afterRetry) });
+            }, 220, epoch, requireEnabled);
             return;
           }
         }
-        finish({ autoAdvanced: false });
+        finish({ autoAdvanced: false, verified: isTfVerified(verified) });
       }, lastClickAt + POST_CLICK_VERIFY_DELAY_MS, epoch, requireEnabled);
       return;
     }
 
-    finish({ autoAdvanced: false });
+    finish({ autoAdvanced: false, verified: false });
   }
 
   // =========================================================================
@@ -975,7 +1175,7 @@
         const { type, shortInp, tf, mcq } = classified;
         const payload = EXT.extractQuestionPayload(targetBlock.blockEl, classified);
         const oldUiAns = EXT.detectUIAns(type, mcq, shortInp, tf);
-        const qKey = `LIST_Q${targetBlock.qNum}_${type}_${payload.stemText.slice(0, 50)}`;
+        const qKey = `LIST_Q${targetBlock.qNum}_${type}_${stripVolatileUiText(payload.stemText).slice(0, 50)}`;
         skippedFailedListKeys.delete(qKey);
         failCountMap.delete(qKey);
         const rejectedList = getRejectedAnswers(qKey, oldUiAns);
@@ -1087,6 +1287,8 @@
       const qCode = (bodyTxt.match(/#\d{5,}/) || [])[0] || (targetQNum ? `Câu ${targetQNum}` : "Câu hiện tại");
       const cleanQuestionFull = payload.extraDetails ? `${payload.stemText}\n${payload.extraDetails}` : payload.stemText;
       const curSig = computeQuestionFingerprint(type, payload);
+      solvedSingleFingerprints.delete(curSig);
+      if (/^#\d{5,}$/.test(qCode)) solvedExplicitQCodes.delete(qCode);
       failCountMap.delete(curSig);
       const rejectedList = getRejectedAnswers(curSig, oldUiAns);
 
@@ -1129,6 +1331,8 @@
       const normAns = r.normalizedAns || "";
       const cleanExportAns = formatCleanAnswerForExport(type, normAns, mcq);
       solvedSignature = curSig;
+      solvedSingleFingerprints.add(curSig);
+      if (/^#\d{5,}$/.test(qCode)) solvedExplicitQCodes.add(qCode);
 
       saveCleanExportItem({
         signature: curSig,
@@ -1191,7 +1395,7 @@
 
         const { type, shortInp, tf, mcq } = classified;
         const payload = EXT.extractQuestionPayload(b.blockEl, classified);
-        const qKey = `LIST_Q${b.qNum}_${type}_${payload.stemText.slice(0, 50)}`;
+        const qKey = `LIST_Q${b.qNum}_${type}_${stripVolatileUiText(payload.stemText).slice(0, 50)}`;
         if (skippedFailedListKeys.has(qKey)) {
           solvedBlockEls.add(b.blockEl);
           continue;
@@ -1537,14 +1741,24 @@
     const { type, shortInp, tf, mcq } = classified;
     const payload = EXT.extractQuestionPayload(scopeDoc, classified);
     const qCode = (bodyTxt.match(/#\d{5,}/) || [])[0] || `Câu_${attemptedSingleQuestions.size + 1}`;
+    const hasExplicitCode = /^#\d{5,}$/.test(qCode);
     const cleanQuestionFull = payload.extraDetails ? `${payload.stemText}\n${payload.extraDetails}` : payload.stemText;
 
     const curSig = computeQuestionFingerprint(type, payload);
-    if (!forceDiagnostic && curSig === solvedSignature) return { reason: "already_solved_sig", qCode, type };
+    if (
+      !forceDiagnostic &&
+      (curSig === solvedSignature ||
+        solvedSingleFingerprints.has(curSig) ||
+        (hasExplicitCode && solvedExplicitQCodes.has(qCode)))
+    ) {
+      return { reason: "already_solved_sig", qCode, type };
+    }
 
     const existingUIAns = EXT.detectUIAns(type, mcq, shortInp, tf);
     if (existingUIAns && /Đáp án của bạn/i.test(bodyTxt)) {
       solvedSignature = curSig;
+      solvedSingleFingerprints.add(curSig);
+      if (hasExplicitCode) solvedExplicitQCodes.add(qCode);
       const cleanExportAns = formatCleanAnswerForExport(type, existingUIAns, mcq);
       saveCleanExportItem({
         signature: curSig,
@@ -1599,6 +1813,9 @@
           const fails = (failCountMap.get(curSig) || 0) + 1;
           failCountMap.set(curSig, fails);
           if (fails >= 3) {
+            solvedSignature = curSig;
+            solvedSingleFingerprints.add(curSig);
+            if (hasExplicitCode) solvedExplicitQCodes.add(qCode);
             isProcessing = false;
             syncStatus("⚠️ Câu này lỗi 3 lần (kiểm tra API Key / bấm 🔍 Quét ngay hoặc chuyển câu kế)");
           } else {
@@ -1612,6 +1829,10 @@
         }
 
         failCountMap.delete(curSig);
+        solvedSignature = curSig;
+        solvedSingleFingerprints.add(curSig);
+        if (hasExplicitCode) solvedExplicitQCodes.add(qCode);
+
         const r = res.result;
         const normAns = r.normalizedAns || "";
         const cleanExportAns = formatCleanAnswerForExport(type, normAns, mcq);
@@ -1630,6 +1851,21 @@
           modelUsed: r.modelUsed || ""
         });
 
+        const preApplyFp = computeLiveQuestionFingerprint(scopeDoc);
+        if (
+          preApplyFp &&
+          preApplyFp !== curSig &&
+          !(hasExplicitCode && getVisibleBodyText(scopeDoc).includes(qCode))
+        ) {
+          isProcessing = false;
+          syncStatus(
+            `⚠️ Câu ${qCode} đã đổi trước khi tích — dừng tích nhầm`,
+            `${qCode}: ${cleanExportAns}`,
+            buildMetaFromResult(qCode, r)
+          );
+          return;
+        }
+
         syncStatus(
           autoAdvanceEnabled ? `Đã giải ${qCode}` : `✅ Đã tích ${qCode} (Chờ bấm Tiếp)`,
           `${qCode}: ${cleanExportAns}`,
@@ -1645,6 +1881,15 @@
           tf,
           (applyOutcome) => {
             if (!isRunAlive(myEpoch, true)) return;
+            if (applyOutcome?.verified === false) {
+              isProcessing = false;
+              syncStatus(
+                `⚠️ Đã giải ${qCode}: ${normAns} nhưng web chưa nhận click — chọn tay hoặc bấm 🔄 Giải lại`,
+                `${qCode}: ${cleanExportAns}`,
+                buildMetaFromResult(qCode, r)
+              );
+              return;
+            }
             if (autoAdvanceEnabled) {
               advanceSingleStep(curSig, myEpoch, {
                 alreadyAutoAdvanced: Boolean(applyOutcome?.autoAdvanced),
@@ -1658,6 +1903,7 @@
             epoch: myEpoch,
             requireEnabled: true,
             expectedFingerprint: curSig,
+            expectedQCode: hasExplicitCode ? qCode : "",
             scopeDoc
           }
         );
@@ -1696,11 +1942,14 @@
     }
     cancelActiveWork();
     hasAutoExported = false;
+    solvedSignature = "";
     solvedListKeys.clear();
     solvedBlockEls = new WeakSet();
     skippedFailedListKeys.clear();
     failCountMap.clear();
     attemptedSingleQuestions.clear();
+    solvedSingleFingerprints.clear();
+    solvedExplicitQCodes.clear();
     clickedNavNums.clear();
     if (isExtensionEnabled) {
       scheduleManagedTimeout(() => {
@@ -1718,6 +1967,8 @@
         cancelActiveWork();
       } else if (changed) {
         solvedSignature = "";
+        solvedSingleFingerprints.clear();
+        solvedExplicitQCodes.clear();
         isProcessing = false;
         isSelfAdvancing = false;
         processScreen(false);
@@ -1736,6 +1987,8 @@
     solvedSignature = "";
     failCountMap.clear();
     skippedFailedListKeys.clear();
+    solvedSingleFingerprints.clear();
+    solvedExplicitQCodes.clear();
     solvedBlockEls = new WeakSet();
     return processScreen(true);
   }
@@ -1783,8 +2036,10 @@
       configSynced,
       autoAdvanceEnabled,
       intelligenceMode,
+      solvedSingleCount: solvedSingleFingerprints.size,
       solvedListCount: solvedListKeys.size,
       skippedListCount: skippedFailedListKeys.size,
+      sigHead: String(solvedSignature || "").slice(0, 60),
       dom: EXT.inspectDomSummary?.(globalScope.document)
     }),
     cleanup: cleanupSelf,
@@ -1819,6 +2074,8 @@
         skippedFailedListKeys.clear();
         failCountMap.clear();
         attemptedSingleQuestions.clear();
+        solvedSingleFingerprints.clear();
+        solvedExplicitQCodes.clear();
         clickedNavNums.clear();
         rejectedHistoryMap.clear();
       }

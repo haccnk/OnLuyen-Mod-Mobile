@@ -730,11 +730,17 @@ class SolverController extends ChangeNotifier {
       final letters = dom['mcqLetters'] is Map
           ? Map<String, dynamic>.from(dom['mcqLetters'] as Map)
           : const <String, dynamic>{};
+      final clickMap = diag['lastClick'] is Map ? Map<String, dynamic>.from(diag['lastClick'] as Map) : null;
+      final clickInfo = clickMap == null
+          ? 'none'
+          : '${clickMap['ans'] ?? '?'}/${clickMap['attempts'] ?? 0}/ok=${clickMap['verified'] ?? false}/'
+              '${clickMap['via'] ?? '-'}/${clickMap['targetTag'] ?? '-'}';
       return 'url=${diag['url']} | quiz=${diag['isQuiz']} | on=${diag['isExtensionEnabled']} | '
           'busy=${diag['isProcessing']} | sync=${diag['configSynced']} | '
           'vw=${dom['vw']}x${dom['vh']} | tbl=${dom['tables']} rad=${dom['radios']} inp=${dom['inputs']} ifr=${dom['iframes']} | '
           'ABCD=${letters['A'] ?? 0}/${letters['B'] ?? 0}/${letters['C'] ?? 0}/${letters['D'] ?? 0} | '
-          'TF=${dom['tfTrue'] ?? 0}/${dom['tfFalse'] ?? 0} blk=${dom['multiBlocks'] ?? 0}';
+          'TF=${dom['tfTrue'] ?? 0}/${dom['tfFalse'] ?? 0} blk=${dom['multiBlocks'] ?? 0} | '
+          'solved=${diag['solvedSingleCount'] ?? 0}/${diag['solvedListCount'] ?? 0} | click=$clickInfo';
     } catch (e) {
       return 'Lỗi chẩn đoán (injected=$injected): $e';
     }

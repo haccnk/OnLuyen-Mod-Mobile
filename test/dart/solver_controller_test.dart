@@ -177,5 +177,27 @@ void main() {
       expect(controller.state.enabled, isFalse);
       expect(controller.state.pillState, PillVisualState.paused);
     });
+
+    test('MultiAgentSolver.buildCacheKey strips volatile HH:MM:SS exam countdown timers', () {
+      const req1 = QuizSolveRequest(
+        questionType: 'MCQ',
+        qCode: '#13153797',
+        rawScreenText: '01:26:41\nCho hai tap hop A va B.',
+        extraDetails: 'Cac lua chon:\nA. 1\nB. 2\nC. 3\nD. 4',
+        intelligenceMode: IntelligenceMode.fast,
+      );
+      const req2 = QuizSolveRequest(
+        questionType: 'MCQ',
+        qCode: '#13153797',
+        rawScreenText: '01:26:39\nCho hai tap hop A va B.',
+        extraDetails: 'Cac lua chon:\nA. 1\nB. 2\nC. 3\nD. 4',
+        intelligenceMode: IntelligenceMode.fast,
+      );
+
+      expect(
+        MultiAgentSolver.buildCacheKey(req1),
+        equals(MultiAgentSolver.buildCacheKey(req2)),
+      );
+    });
   });
 }

@@ -1618,6 +1618,242 @@ test("34. Single-Step khi chưa thấy nút chuyển & maxQ=0 không báo hoàn 
   assert.strictEqual(loadedBtn.AGENT._internalForTest.findActionButtons(envBtn.doc).nextBtn, iconNext);
 });
 
+test("35. OnLuyen Mobile UI ('<div> 01:26:41 ↑' + 'Câu: 1 #13153797 | Báo lỗi | Đánh dấu'): không rò đồng hồ, chọn đúng C, 0 vòng lặp", async () => {
+  const { doc, env } = createTestEnvironment({
+    innerWidth: 390,
+    innerHeight: 844,
+    url: "https://app.onluyen.vn/doing/13153797"
+  });
+  const origSetTimeout = global.setTimeout;
+  let solveCalls = 0;
+
+  let resolveSolve = null;
+  const loaded = loadModulesInEnv(env, async (handler) => {
+    if (handler === "solveQuiz") {
+      solveCalls += 1;
+      return new Promise((resolve) => {
+        resolveSolve = resolve;
+      });
+    }
+    return null;
+  });
+  loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+  loaded.AGENT._internalForTest.resetState();
+
+  const timerSpan = el(doc, "span", { text: "01:26:41", rect: { top: 14, left: 150, width: 80, height: 22 } });
+  const topBarDiv = el(doc, "div", { className: "mobile-exam-bar", rect: { top: 0, left: 0, width: 390, height: 54 } }, [
+    el(doc, "button", { text: "☰", rect: { top: 10, left: 12, width: 34, height: 34 } }),
+    timerSpan,
+    el(doc, "button", { text: "↑", rect: { top: 10, left: 340, width: 34, height: 34 } })
+  ]);
+  assert.strictEqual(loaded.EXT.isNavPanelContainer(topBarDiv), true, "Top bar div chứa 01:26:41 phải bị lọc như chrome/nav");
+
+  const cards = [];
+  const optionRows = ["A", "B", "C", "D"].map((L, i) => {
+    const y = 240 + i * 68;
+    const badge = el(doc, "span", { className: "opt-badge", text: L, rect: { top: y + 14, left: 26, width: 28, height: 28 } });
+    const card = el(doc, "div", {
+      className: "answer-item-box",
+      cs: { cursor: "pointer" },
+      rect: { top: y, left: 14, width: 356, height: 58 }
+    }, [
+      badge,
+      el(doc, "span", { text: `B\\A = {${i + 1}}.`, rect: { top: y + 14, left: 66, width: 220, height: 26 } })
+    ]);
+    card.addEventListener("click", () => {
+      cards.forEach((c) => c.setAttribute("class", "answer-item-box"));
+      card.setAttribute("class", "answer-item-box selected");
+    });
+    cards.push(card);
+    return el(doc, "div", { className: "col-12", rect: { top: y, left: 10, width: 370, height: 62 } }, [card]);
+  });
+
+  const qCard = el(doc, "div", { rect: { top: 64, left: 10, width: 370, height: 520 } }, [
+    el(doc, "div", { text: "Câu: 1 #13153797 | Báo lỗi | Đánh dấu", rect: { top: 72, left: 12, width: 350, height: 28 } }),
+    el(doc, "p", { text: "Cho hai tập hợp: A = {0; 2; 5}, B = {2; 4; 6; 8}. Tìm B\\A.", rect: { top: 112, left: 12, width: 350, height: 60 } }),
+    ...optionRows
+  ]);
+  doc.body.appendChild(topBarDiv);
+  doc.body.appendChild(qCard);
+
+  const cls0 = loaded.EXT.classifyQuestionInScope(doc, true);
+  const p0 = loaded.EXT.extractQuestionPayload(doc, cls0);
+  assert.ok(!/01:26:\d{2}/.test(p0.stemText), "stemText không được dính đồng hồ 01:26:41");
+  assert.ok(!/Báo lỗi|Đánh dấu/.test(p0.stemText), "stemText không được dính Báo lỗi | Đánh dấu");
+
+  const startRes = loaded.AGENT._internalForTest.processScreen(false);
+  assert.strictEqual(startRes.reason, "solving_started");
+
+  for (let i = 0; i < 20 && !resolveSolve; i++) {
+    await new Promise((r) => origSetTimeout(r, 10));
+  }
+  assert.ok(resolveSolve, "Phải gọi solveQuiz");
+
+  // Đồng hồ nhảy giây trong lúc AI đang giải và sau khi giải xong
+  timerSpan.textContent = "01:26:40";
+  doc.body.appendChild(el(doc, "span", { text: "01:26:40" })); // giả lập text node nhảy giây nếu lọt vào body
+  resolveSolve({ success: true, result: { normalizedAns: "C", confidence: 100 } });
+
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => origSetTimeout(r, 15));
+    if (!loaded.AGENT.getDiagnostics().isProcessing && !loaded.AGENT.getDiagnostics().isSelfAdvancing) break;
+  }
+
+  assert.strictEqual(loaded.EXT.detectUIAns("MCQ", cls0.mcq, null, null), "C", "Phải tích được đáp án C dù đồng hồ nhảy giây");
+  assert.strictEqual(loaded.AGENT.getDiagnostics().lastClick?.verified, true);
+  assert.strictEqual(loaded.AGENT.getDiagnostics().lastClick?.via, "detectUIAns");
+
+  timerSpan.textContent = "01:26:39";
+  const rescan1 = loaded.AGENT._internalForTest.processScreen(false);
+  const rescan2 = loaded.AGENT._internalForTest.processScreen(false);
+  loaded.AGENT.cleanup();
+
+  assert.strictEqual(rescan1.reason, "already_solved_sig");
+  assert.strictEqual(rescan2.reason, "already_solved_sig");
+  assert.strictEqual(solveCalls, 1, "Tuyệt đối chỉ gọi solveQuiz đúng 1 lần, không mắc kẹt vòng lặp");
+});
+
+test("36. Xác nhận chọn qua snapshotDiff (class Tailwind 'bg-blue-500 border-primary') & cascade qua ứng viên thứ 4-5 (<input> ẩn)", async () => {
+  // 36a: Class lạ bg-blue-500 border-primary được xác nhận đúng ngay lần click đầu qua snapshotDiff
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const origSetTimeout = global.setTimeout;
+    const { EXT, AGENT, sandbox } = loadModulesInEnv(env, async () => null);
+    sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+
+    let cClicks = 0;
+    const rows = ["A", "B", "C", "D"].map((L, i) => {
+      const y = 140 + i * 54;
+      const card = el(doc, "div", {
+        className: "p-3 rounded border",
+        cs: { cursor: "pointer" },
+        rect: { top: y, left: 12, width: 350, height: 46 }
+      }, [
+        el(doc, "span", { text: L, rect: { top: y + 10, left: 22, width: 22, height: 22 } }),
+        el(doc, "span", { text: `Đáp án ${L}`, rect: { top: y + 10, left: 52, width: 220, height: 22 } })
+      ]);
+      if (L === "C") {
+        card.addEventListener("click", () => {
+          cClicks += 1;
+          card.setAttribute("class", "p-3 rounded bg-blue-500 border-primary");
+        });
+      }
+      return card;
+    });
+    doc.body.appendChild(el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 340 } }, ["Đề bài:", ...rows]));
+
+    const cls = EXT.classifyQuestionInScope(doc, true);
+    const outcome = await new Promise((resolve) => {
+      AGENT._internalForTest.applyAnswerToDOM("MCQ", "C", null, cls.mcq, null, null, resolve);
+    });
+    assert.strictEqual(cClicks, 1, "Chỉ click 1 lần, không click lại làm bỏ chọn");
+    assert.strictEqual(outcome.verified, true);
+    assert.strictEqual(outcome.autoAdvanced, false);
+    assert.strictEqual(AGENT.getDiagnostics().lastClick?.via, "snapshotDiff");
+  }
+
+  // 36b: Ứng viên 1,2,3 (decoy label, card, badge) không ăn -> cascade tới ứng viên thứ 5 (input[type=radio] ẩn) thành công
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const origSetTimeout = global.setTimeout;
+    const { EXT, AGENT, sandbox } = loadModulesInEnv(env, async () => null);
+    sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+
+    let radioClicks = 0;
+    const rows = ["A", "B", "C", "D"].map((L, i) => {
+      const y = 140 + i * 56;
+      const decoyLbl = el(doc, "label", { text: "", rect: { top: y, left: 12, width: 120, height: 20 } });
+      const badge = el(doc, "span", { text: L, rect: { top: y + 12, left: 24, width: 22, height: 22 } });
+      const card = el(doc, "div", {
+        className: "answer-card",
+        cs: { cursor: "pointer" },
+        rect: { top: y + 4, left: 14, width: 340, height: 46 }
+      }, [badge, el(doc, "span", { text: `Mục ${L}`, rect: { top: y + 12, left: 56, width: 200, height: 22 } })]);
+      const hiddenRadio = el(doc, "input", { type: "radio", style: { opacity: "0" }, rect: { top: y + 14, left: 14, width: 16, height: 16 } });
+      if (L === "C") {
+        hiddenRadio.addEventListener("click", () => {
+          radioClicks += 1;
+          hiddenRadio.checked = true;
+        });
+      }
+      return el(doc, "div", { className: "row-wrapper", rect: { top: y, left: 10, width: 360, height: 52 } }, [
+        decoyLbl,
+        card,
+        hiddenRadio
+      ]);
+    });
+    doc.body.appendChild(el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 340 } }, ["Đề:", ...rows]));
+
+    const cls = EXT.classifyQuestionInScope(doc, true);
+    const cands = AGENT._internalForTest.getMcqClickCandidates(cls.mcq[2], doc);
+    assert.ok(cands.length >= 5, `Phải có đủ ứng viên tới input ẩn (thực tế: ${cands.length})`);
+
+    const outcome = await new Promise((resolve) => {
+      AGENT._internalForTest.applyAnswerToDOM("MCQ", "C", null, cls.mcq, null, null, resolve);
+    });
+    assert.strictEqual(radioClicks, 1);
+    assert.strictEqual(outcome.verified, true);
+    assert.strictEqual(EXT.detectUIAns("MCQ", cls.mcq, null, null), "C");
+    assert.strictEqual(AGENT.getDiagnostics().lastClick?.attempts, 5);
+  }
+});
+
+test("37. Circuit breaker chống vòng lặp khi click thất bại toàn bộ (verified=false) & mở lại khi bấm Quét ngay", async () => {
+  const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  const origSetTimeout = global.setTimeout;
+  let solveCalls = 0;
+  let nextClicks = 0;
+  const statuses = [];
+
+  const loaded = loadModulesInEnv(env, async (handler, args) => {
+    if (handler === "solveQuiz") {
+      solveCalls += 1;
+      return { success: true, result: { normalizedAns: "B", confidence: 92 } };
+    }
+    if (handler === "syncStatus") {
+      statuses.push(args?.solverStatus || "");
+    }
+    return null;
+  });
+  loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+  loaded.AGENT._internalForTest.resetState();
+
+  const opts = ["A", "B", "C", "D"].map((L, i) =>
+    el(doc, "button", { text: `${L}. Phương án ${L}`, rect: { top: 160 + i * 48, left: 10, width: 340, height: 40 } })
+  );
+  const nextBtn = el(doc, "button", { text: "Câu tiếp", rect: { top: 380, left: 120, width: 140, height: 40 } });
+  nextBtn.addEventListener("click", () => {
+    nextClicks += 1;
+  });
+  doc.body.appendChild(el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 360 } }, ["Câu: 1 #99887766", ...opts, nextBtn]));
+
+  const firstRun = loaded.AGENT._internalForTest.processScreen(false);
+  assert.strictEqual(firstRun.reason, "solving_started");
+
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => origSetTimeout(r, 15));
+    if (!loaded.AGENT.getDiagnostics().isProcessing && !loaded.AGENT.getDiagnostics().isSelfAdvancing) break;
+  }
+
+  assert.strictEqual(nextClicks, 0, "Không được tự bấm Câu tiếp khi chưa chọn được đáp án");
+  assert.ok(statuses.some((s) => s.includes("web chưa nhận click")), "Phải báo rõ trạng thái cảnh báo chưa nhận click");
+  assert.strictEqual(loaded.AGENT.getDiagnostics().lastClick?.verified, false);
+
+  // Quét lại thụ động nhiều lần không được giải lại câu này
+  assert.strictEqual(loaded.AGENT._internalForTest.processScreen(false).reason, "already_solved_sig");
+  assert.strictEqual(loaded.AGENT._internalForTest.processScreen(false).reason, "already_solved_sig");
+  assert.strictEqual(solveCalls, 1, "Circuit breaker phải khóa ở 1 lần solveQuiz");
+
+  // Người dùng chủ động bấm Quét ngay -> cho phép giải lại
+  loaded.AGENT.forceScanNow();
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => origSetTimeout(r, 15));
+    if (!loaded.AGENT.getDiagnostics().isProcessing) break;
+  }
+  loaded.AGENT.cleanup();
+  assert.strictEqual(solveCalls, 2);
+});
+
 (async () => {
   let passed = 0;
   let failed = 0;

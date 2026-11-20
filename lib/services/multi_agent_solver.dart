@@ -34,12 +34,13 @@ NGUYÊN TẮC TỐI THƯỢNG:
   static String buildCacheKey(QuizSolveRequest req) {
     final passageHead = req.contextPassage.trim();
     final shortPassage = passageHead.length > 220 ? passageHead.substring(0, 220) : passageHead;
+    final cleanRawText = req.rawScreenText.replaceAll(RegExp(r'\b\d{1,2}:\d{2}:\d{2}\b'), '').trim();
     return [
       req.intelligenceMode.apiName,
       req.questionType,
       req.qCode,
       shortPassage,
-      req.rawScreenText.trim(),
+      cleanRawText,
       req.extraDetails.trim(),
       req.visualSignature.trim(),
     ].join('::');
