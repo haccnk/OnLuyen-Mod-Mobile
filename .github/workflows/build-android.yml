@@ -11,6 +11,9 @@ on:
       - master
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build_android:
     name: Test & Build Release APK
@@ -39,7 +42,7 @@ jobs:
           echo "OK: 0 hardcoded API keys found."
 
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -91,6 +94,21 @@ jobs:
       - name: Install Flutter dependencies
         run: flutter pub get
 
+      - name: Patch legacy proguard-android.txt for AGP 9+
+        run: |
+          python3 -c '
+          import os, pathlib
+          pub_cache = pathlib.Path(os.environ.get("PUB_CACHE", str(pathlib.Path.home() / ".pub-cache")))
+          for p in pub_cache.rglob("build.gradle*"):
+              try:
+                  txt = p.read_text(encoding="utf-8")
+              except Exception:
+                  continue
+              if "proguard-android.txt" in txt:
+                  p.write_text(txt.replace("proguard-android.txt", "proguard-android-optimize.txt"), encoding="utf-8")
+                  print("Patched:", p)
+          '
+
       - name: Analyze Dart code
         run: flutter analyze --no-fatal-infos
 
@@ -109,3 +127,13 @@ jobs:
           name: OnLuyen-Mod-Mobile-Android-APK
           path: build/release_artifacts/OnLuyen_Mod_Mobile-v1.0.apk
           retention-days: 30
+
+      - name: Publish APK to GitHub Release (v1.0)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v1.0 build/release_artifacts/OnLuyen_Mod_Mobile-v1.0.apk \
+            --title "OnLuyen Mod Mobile v1.0" \
+            --notes "Phiên bản phát hành OnLuyen Mod Mobile v1.0 (Android APK & iOS IPA unsigned). Tải trực tiếp file bên dưới để cài đặt." \
+            || gh release upload v1.0 build/release_artifacts/OnLuyen_Mod_Mobile-v1.0.apk --clobber

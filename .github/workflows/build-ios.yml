@@ -7,6 +7,9 @@ on:
       - master
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build_ios:
     name: Build Unsigned iOS IPA
@@ -40,10 +43,22 @@ jobs:
           python3 -c '
           import pathlib, re
           pbx = pathlib.Path("ios/Runner.xcodeproj/project.pbxproj")
+          target_ver = "15.0"
           if pbx.exists():
               txt = pbx.read_text()
-              txt = re.sub(r"IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;", "IPHONEOS_DEPLOYMENT_TARGET = 13.0;", txt)
+              found = [float(v) for v in re.findall(r"IPHONEOS_DEPLOYMENT_TARGET = ([0-9.]+);", txt)]
+              max_existing = max(found) if found else 15.0
+              best = max(max_existing, 15.0)
+              target_ver = f"{best:.1f}" if best == int(best) else str(best)
+              txt = re.sub(r"IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;", f"IPHONEOS_DEPLOYMENT_TARGET = {target_ver};", txt)
               pbx.write_text(txt)
+          podfile = pathlib.Path("ios/Podfile")
+          if podfile.exists():
+              ptxt = podfile.read_text()
+              ptxt = re.sub(r"platform :ios,\s*'\''[0-9.]+'\''", f"platform :ios, '\''{target_ver}'\''", ptxt)
+              ptxt = ptxt.replace("'\''15.0'\''", f"'\''{target_ver}'\''")
+              podfile.write_text(ptxt)
+          print("Using iOS deployment target:", target_ver)
           '
 
       - name: Install Flutter dependencies
@@ -73,3 +88,13 @@ jobs:
           name: OnLuyen-Mod-Mobile-iOS-IPA-Unsigned
           path: build/ios/ipa/OnLuyen_Mod_Mobile-v1.0-unsigned.ipa
           retention-days: 30
+
+      - name: Publish IPA to GitHub Release (v1.0)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v1.0 build/ios/ipa/OnLuyen_Mod_Mobile-v1.0-unsigned.ipa \
+            --title "OnLuyen Mod Mobile v1.0" \
+            --notes "Phiên bản phát hành OnLuyen Mod Mobile v1.0 (Android APK & iOS IPA unsigned). Tải trực tiếp file bên dưới để cài đặt." \
+            || gh release upload v1.0 build/ios/ipa/OnLuyen_Mod_Mobile-v1.0-unsigned.ipa --clobber
