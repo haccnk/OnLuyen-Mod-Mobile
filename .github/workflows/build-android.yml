@@ -1,0 +1,111 @@
+name: Build Android APK (OnLuyen Mod Mobile)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build_android:
+    name: Test & Build Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for JS tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify JS syntax & run JS extractor/agent tests
+        run: |
+          node --check assets/js/inject.js assets/js/dom_extractor_mobile.js assets/js/mobile_agent.js test/js/mock_dom.js test/js/run_tests.js
+          node test/js/run_tests.js
+
+      - name: Verify zero API keys in repository
+        run: |
+          if grep -rnE "AIza[0-9A-Za-z_-]{15,}|AQ\.Ab[0-9A-Za-z_-]{10,}" . --exclude-dir=.git; then
+            echo "ERROR: Hardcoded API key detected!"
+            exit 1
+          fi
+          echo "OK: 0 hardcoded API keys found."
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter (Stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Bootstrap Android Gradle Wrapper & Native Scaffolding
+        run: |
+          mkdir -p /tmp/custom_android
+          cp android/app/src/main/AndroidManifest.xml /tmp/custom_android/AndroidManifest.xml
+          cp android/app/src/main/res/xml/network_security_config.xml /tmp/custom_android/network_security_config.xml
+          cp android/app/src/main/res/values/styles.xml /tmp/custom_android/styles.xml
+          cp android/app/src/main/res/values-night/styles.xml /tmp/custom_android/styles_night.xml
+          cp android/app/src/main/res/drawable/launch_background.xml /tmp/custom_android/launch_background.xml
+          cp android/app/src/main/kotlin/com/onluyenmod/onluyen_mod_mobile/MainActivity.kt /tmp/custom_android/MainActivity.kt
+          cp android/app/proguard-rules.pro /tmp/custom_android/proguard-rules.pro
+
+          flutter create --org com.onluyenmod --project-name onluyen_mod_mobile --platforms=android /tmp/scaffold_android
+          rm -rf android
+          cp -r /tmp/scaffold_android/android ./android
+
+          mkdir -p android/app/src/main/res/xml android/app/src/main/res/values android/app/src/main/res/values-night android/app/src/main/res/drawable android/app/src/main/kotlin/com/onluyenmod/onluyen_mod_mobile
+          cp /tmp/custom_android/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          cp /tmp/custom_android/network_security_config.xml android/app/src/main/res/xml/network_security_config.xml
+          cp /tmp/custom_android/styles.xml android/app/src/main/res/values/styles.xml
+          cp /tmp/custom_android/styles_night.xml android/app/src/main/res/values-night/styles.xml
+          cp /tmp/custom_android/launch_background.xml android/app/src/main/res/drawable/launch_background.xml
+          cp /tmp/custom_android/MainActivity.kt android/app/src/main/kotlin/com/onluyenmod/onluyen_mod_mobile/MainActivity.kt
+          cp /tmp/custom_android/proguard-rules.pro android/app/proguard-rules.pro
+
+          python3 -c '
+          import pathlib, re
+          for name in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
+              p = pathlib.Path(name)
+              if p.exists():
+                  txt = p.read_text()
+                  txt = re.sub(r"minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 21", txt)
+                  txt = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 21", txt)
+                  if "multiDexEnabled" not in txt:
+                      txt = txt.replace("minSdk = 21", "minSdk = 21\n        multiDexEnabled = true")
+                      txt = txt.replace("minSdkVersion 21", "minSdkVersion 21\n        multiDexEnabled true")
+                  p.write_text(txt)
+          '
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Analyze Dart code
+        run: flutter analyze --no-fatal-infos
+
+      - name: Run Dart unit tests
+        run: flutter test
+
+      - name: Build Android Release APK
+        run: |
+          flutter build apk --release
+          mkdir -p build/release_artifacts
+          cp build/app/outputs/flutter-apk/app-release.apk build/release_artifacts/OnLuyen_Mod_Mobile-v1.0.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnLuyen-Mod-Mobile-Android-APK
+          path: build/release_artifacts/OnLuyen_Mod_Mobile-v1.0.apk
+          retention-days: 30
