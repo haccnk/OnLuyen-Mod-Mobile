@@ -10,9 +10,11 @@
   }
 
   const WATCHDOG_TIMEOUT_MS = 55000;
-  const POST_CLICK_VERIFY_DELAY_MS = 200;
+  const POST_CLICK_VERIFY_DELAY_MS = 320;
 
+  let runEpoch = 0;
   let isProcessing = false;
+  let isSelfAdvancing = false;
   let solvedSignature = "";
   let debounceTimer = null;
   let maxWaitTimer = null;
@@ -30,13 +32,59 @@
   let processingWatchdog = null;
   let hasAutoExported = false;
   let lastWaitingStatusAt = 0;
+  let _cachedBodyTxt = "";
+  let _cachedBodyTxtAt = 0;
+  let _cachedBodyDoc = null;
 
+  const managedTimers = new Set();
   const solvedListKeys = new Set();
   let solvedBlockEls = new WeakSet();
   const skippedFailedListKeys = new Set();
   const failCountMap = new Map();
   const attemptedSingleQuestions = new Set();
+  const clickedNavNums = new Set();
   const rejectedHistoryMap = new Map();
+
+  function isRunAlive(epoch, requireEnabled = true) {
+    return epoch === runEpoch && (!requireEnabled || isExtensionEnabled);
+  }
+
+  function scheduleManagedTimeout(fn, ms, epoch = null, requireEnabled = true) {
+    let timerId = null;
+    timerId = setTimeout(() => {
+      managedTimers.delete(timerId);
+      if (epoch !== null && !isRunAlive(epoch, requireEnabled)) return;
+      fn();
+    }, ms);
+    managedTimers.add(timerId);
+    return timerId;
+  }
+
+  function clearAllManagedTimers() {
+    for (const id of managedTimers) {
+      clearTimeout(id);
+    }
+    managedTimers.clear();
+    clearTimeout(debounceTimer);
+    clearTimeout(maxWaitTimer);
+    debounceTimer = null;
+    maxWaitTimer = null;
+  }
+
+  function invalidateBodyTextCache() {
+    _cachedBodyTxt = "";
+    _cachedBodyTxtAt = 0;
+    _cachedBodyDoc = null;
+  }
+
+  function cancelActiveWork() {
+    runEpoch += 1;
+    isProcessing = false;
+    isSelfAdvancing = false;
+    clearProcessingWatchdog();
+    clearAllManagedTimers();
+    invalidateBodyTextCache();
+  }
 
   function normalizeRouteKey(rawUrl = "") {
     if (typeof rawUrl === "string" && rawUrl) {
@@ -54,12 +102,19 @@
   function getVisibleBodyText(scopeDoc = globalScope.document) {
     const body = scopeDoc?.body;
     if (!body) return "";
-    if (typeof body.innerText === "string") return body.innerText;
-    return body.textContent || "";
+    const now = Date.now();
+    if (_cachedBodyDoc === scopeDoc && now - _cachedBodyTxtAt <= 400) {
+      return _cachedBodyTxt;
+    }
+    const txt = typeof body.innerText === "string" ? body.innerText : (body.textContent || "");
+    _cachedBodyDoc = scopeDoc;
+    _cachedBodyTxt = txt;
+    _cachedBodyTxtAt = now;
+    return txt;
   }
 
   function waitMs(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => scheduleManagedTimeout(resolve, ms));
   }
 
   function waitNextTwoFrames() {
@@ -88,12 +143,13 @@
     return null;
   }
 
-  function startProcessingWatchdog(label = "") {
+  function startProcessingWatchdog(label = "", epoch = runEpoch) {
     if (processingWatchdog) clearTimeout(processingWatchdog);
     processingWatchdog = setTimeout(() => {
       processingWatchdog = null;
-      if (isProcessing) {
+      if (epoch === runEpoch && isProcessing) {
         isProcessing = false;
+        isSelfAdvancing = false;
         syncStatus(`⚠️ Quá thời gian chờ phản hồi${label ? ` (${label})` : ""}, đã tự mở khóa!`);
       }
     }, WATCHDOG_TIMEOUT_MS);
@@ -147,9 +203,19 @@
     }
   }
 
-  function dispatchClick(el) {
+  function scrollIfOffScreen(el) {
     if (!el) return;
-    scrollTargetIntoCenter(el);
+    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { top: 0, bottom: 0, height: 0 };
+    const vh = globalScope.innerHeight || 800;
+    if (r.height === 0 || r.top < 60 || r.bottom > vh - 60) {
+      scrollTargetIntoCenter(el);
+    }
+  }
+
+  function dispatchClick(el, { scroll = true } = {}) {
+    if (!el) return;
+    if (scroll) scrollIfOffScreen(el);
+    invalidateBodyTextCache();
     const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 10, top: 10, width: 20, height: 20 };
     const init = {
       bubbles: true,
@@ -170,26 +236,78 @@
       }
       if (typeof globalScope.MouseEvent === "function") {
         el.dispatchEvent(new globalScope.MouseEvent("mouseup", init));
-        el.dispatchEvent(new globalScope.MouseEvent("click", init));
       }
     } catch (e) {}
-    if (typeof el.click === "function") el.click();
+
+    if (typeof el.click === "function") {
+      el.click();
+    } else {
+      try {
+        if (typeof globalScope.MouseEvent === "function") {
+          el.dispatchEvent(new globalScope.MouseEvent("click", init));
+        }
+      } catch (e) {}
+    }
   }
 
-  function findContinueButton(scopeDoc = document) {
-    const nodes = scopeDoc.querySelectorAll?.("button, [role='button'], a, div, span") || [];
+  function isDisabledButton(el) {
+    if (!el) return true;
+    if (el.disabled === true || el.getAttribute?.("aria-disabled") === "true") return true;
+    const cls = String(el.className || "");
+    return /\b(disabled|is-disabled|ant-btn-disabled)\b/i.test(cls);
+  }
+
+  function findActionButtons(doc = globalScope.document) {
+    let submitBtn = null;
+    let nextBtn = null;
+    const nodes = doc?.querySelectorAll?.("button, [role='button'], a, div, span") || [];
     for (const el of nodes) {
       if ((el.children?.length || 0) > 2) continue;
       const raw = (el.textContent || el.innerText || "").trim();
-      if (raw.length === 0 || raw.length > 14) continue;
+      if (raw.length === 0 || raw.length > 16) continue;
       const t = raw.toUpperCase();
-      if (t !== "TIẾP TỤC" && t !== "CÂU TIẾP" && t !== "TIẾP THEO" && t !== "CÂU SAU") continue;
+      const isSubmit = t === "TRẢ LỜI" || t === "KIỂM TRA" || t === "XÁC NHẬN";
+      const isNext = t === "TIẾP TỤC" || t === "TIẾP THEO" || t === "CÂU TIẾP" || t === "CÂU SAU";
+      if (!isSubmit && !isNext) continue;
+      if (EXT.isEffectivelyHidden?.(el) || EXT.isInsideNavOrChrome(el)) continue;
+      const clickTarget = el.closest ? el.closest("button, [role='button']") || el : el;
+      if (isDisabledButton(el) || isDisabledButton(clickTarget)) continue;
       const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
       if (r.width === 0 || r.height === 0) continue;
-      if (EXT.isInsideNavOrChrome(el)) continue;
-      return el;
+
+      if (isSubmit && !submitBtn) submitBtn = clickTarget;
+      if (isNext && !nextBtn) nextBtn = clickTarget;
+      if (submitBtn && nextBtn) break;
     }
-    return null;
+    return { submitBtn, nextBtn };
+  }
+
+  function findContinueButton(scopeDoc = document) {
+    return findActionButtons(scopeDoc).nextBtn;
+  }
+
+  function computeQuestionFingerprint(type, payload) {
+    return [
+      type || "",
+      String(payload?.stemText || "").slice(0, 140),
+      String(payload?.extraDetails || "").slice(0, 140),
+      String(payload?.visualSignature || "").slice(0, 60)
+    ].join("|");
+  }
+
+  function computeLiveQuestionFingerprint(scopeDoc = globalScope.document) {
+    if (!scopeDoc || !scopeDoc.body) return "";
+    if (typeof EXT.beginScanCache === "function") EXT.beginScanCache();
+    try {
+      const cls = EXT.classifyQuestionInScope(scopeDoc, true);
+      if (!cls || !cls.type) return "";
+      const p = EXT.extractQuestionPayload(scopeDoc, cls);
+      return computeQuestionFingerprint(cls.type, p);
+    } catch (e) {
+      return "";
+    } finally {
+      if (typeof EXT.endScanCache === "function") EXT.endScanCache();
+    }
   }
 
   function resolveAndDetect() {
@@ -290,29 +408,41 @@
     return false;
   }
 
-  function clickMCQ(c) {
-    if (!c) return;
-    if (c.rowEl) scrollTargetIntoCenter(c.rowEl);
-    else if (c.badgeEl) scrollTargetIntoCenter(c.badgeEl);
-
-    if (c.badgeEl) dispatchClick(c.badgeEl);
-    if (c.badgeEl?.parentElement && c.badgeEl.parentElement !== c.rowEl) {
-      dispatchClick(c.badgeEl.parentElement);
+  function pickBestMcqClickTarget(c) {
+    if (!c) return { primary: null, alternate: null };
+    const inner = c.rowEl?.querySelector?.('input[type="radio"], [role="radio"], button, label') || null;
+    const primary = inner || c.rowEl || c.badgeEl || null;
+    let alternate = null;
+    if (c.rowEl && primary !== c.rowEl) {
+      alternate = c.rowEl;
+    } else if (c.badgeEl && primary !== c.badgeEl) {
+      alternate = c.badgeEl;
+    } else {
+      alternate = c.rowEl || c.badgeEl || null;
     }
-    if (c.rowEl) {
-      dispatchClick(c.rowEl);
-      const inp = c.rowEl.querySelector?.("input, label, [role='radio'], [role='button']");
-      if (inp) dispatchClick(inp);
-    }
+    return { primary, alternate };
   }
 
-  function fillInput(inputEl, rawVal, answerKind, cb) {
+  function clickMCQ(c, { useAlternate = false } = {}) {
+    if (!c) return;
+    const { primary, alternate } = pickBestMcqClickTarget(c);
+    const target = useAlternate ? (alternate || primary) : primary;
+    if (!target) return;
+    scrollIfOffScreen(c.rowEl || target);
+    dispatchClick(target, { scroll: false });
+  }
+
+  function fillInput(inputEl, rawVal, answerKind, cb, opts = {}) {
     if (!inputEl) {
       if (typeof cb === "function") cb();
       return;
     }
 
-    scrollTargetIntoCenter(inputEl);
+    const epoch = opts.epoch !== undefined ? opts.epoch : null;
+    const requireEnabled = opts.requireEnabled !== undefined ? opts.requireEnabled : false;
+    if (epoch !== null && !isRunAlive(epoch, requireEnabled)) return;
+
+    scrollIfOffScreen(inputEl);
     const rawStr = String(rawVal ?? "").trim();
     const isTextMode = answerKind === "TEXT" || /[A-Za-zÀ-ỹ]/.test(rawStr);
     const val = isTextMode ? rawStr.replace(/\s+/g, " ").trim() : rawStr.replace(/\s+/g, "");
@@ -350,30 +480,25 @@
         if (typeof globalScope.Event === "function") {
           inputEl.dispatchEvent(new globalScope.Event("change", { bubbles: true }));
         }
-        if (typeof globalScope.KeyboardEvent === "function") {
-          inputEl.dispatchEvent(new globalScope.KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
-          inputEl.dispatchEvent(new globalScope.KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 }));
-        }
         if (typeof inputEl.blur === "function") inputEl.blur();
       } catch (e) {}
     };
 
     apply(val);
-    setTimeout(() => {
+    scheduleManagedTimeout(() => {
       const currentVal = isCE ? (inputEl.textContent || "") : (inputEl.value || "");
       if (!isTextMode && (!currentVal || !String(currentVal).trim())) {
         const altVal = val.includes(",") ? val.replace(",", ".") : val.replace(".", ",");
         apply(altVal);
       }
-      setTimeout(() => {
-        // Post-fill verification
+      scheduleManagedTimeout(() => {
         const detected = EXT.detectUIAns("SHORT_ANSWER", null, inputEl, null);
         if (!detected) {
           apply(val);
         }
         if (typeof cb === "function") cb();
-      }, POST_CLICK_VERIFY_DELAY_MS);
-    }, 180);
+      }, POST_CLICK_VERIFY_DELAY_MS, epoch, requireEnabled);
+    }, 180, epoch, requireEnabled);
   }
 
   function formatCleanAnswerForExport(type, normAns, mcq) {
@@ -392,40 +517,81 @@
   }
 
   // =========================================================================
-  // TÍCH ĐÁP ÁN + SCROLL INTO VIEW + POST-CLICK DOM VERIFICATION (250ms)
+  // TÍCH ĐÁP ÁN + POST-CLICK VERIFICATION + BẢO VỆ TỰ CHUYỂN CÂU
   // =========================================================================
-  function applyAnswerToDOM(type, ansStr, answerKind, mcq, shortInp, tf, onDone) {
+  function applyAnswerToDOM(type, ansStr, answerKind, mcq, shortInp, tf, onDone, opts = {}) {
     const finish = typeof onDone === "function" ? onDone : () => {};
+    const epoch = opts.epoch !== undefined ? opts.epoch : null;
+    const requireEnabled = opts.requireEnabled !== undefined ? opts.requireEnabled : false;
+    const expectedFingerprint = opts.expectedFingerprint || "";
+    const scopeDoc = opts.scopeDoc || globalScope.document;
+
+    if (epoch !== null && !isRunAlive(epoch, requireEnabled)) return;
 
     if (type === "MCQ" && ansStr) {
       const idx = ansStr.charCodeAt(0) - 65;
       if (mcq[idx]) {
-        clickMCQ(mcq[idx]);
-        setTimeout(() => {
+        clickMCQ(mcq[idx], { useAlternate: false });
+        scheduleManagedTimeout(() => {
+          const rowEl = mcq[idx].rowEl;
+          const rowDetached =
+            rowEl &&
+            (rowEl.isConnected === false ||
+              (typeof scopeDoc?.body?.contains === "function" && !scopeDoc.body.contains(rowEl)));
+          if (rowDetached) {
+            finish({ autoAdvanced: true });
+            return;
+          }
+          if (expectedFingerprint) {
+            const liveFp = computeLiveQuestionFingerprint(scopeDoc);
+            if (liveFp && liveFp !== expectedFingerprint) {
+              finish({ autoAdvanced: true });
+              return;
+            }
+          }
           const nowSelected = EXT.detectUIAns("MCQ", mcq, null, null);
           if (nowSelected !== ansStr) {
-            clickMCQ(mcq[idx]);
-            setTimeout(finish, 150);
+            clickMCQ(mcq[idx], { useAlternate: true });
+            scheduleManagedTimeout(() => finish({ autoAdvanced: false }), 220, epoch, requireEnabled);
           } else {
-            finish();
+            finish({ autoAdvanced: false });
           }
-        }, POST_CLICK_VERIFY_DELAY_MS);
+        }, POST_CLICK_VERIFY_DELAY_MS, epoch, requireEnabled);
         return;
       }
     } else if (type === "SHORT_ANSWER" && ansStr !== "") {
-      fillInput(shortInp, ansStr, answerKind, finish);
+      fillInput(shortInp, ansStr, answerKind, () => finish({ autoAdvanced: false }), {
+        epoch,
+        requireEnabled
+      });
       return;
     } else if (type === "TRUE_FALSE" && ansStr.includes("-")) {
       const parts = ansStr.split("-").slice(0, 4);
+      const initialUi = EXT.detectUIAns("TRUE_FALSE", null, null, tf);
+      const initialParts = initialUi ? initialUi.split("-") : [];
+      let clickDelay = 0;
+      let clickedCount = 0;
+
       parts.forEach((p, idx) => {
-        setTimeout(() => {
-          const btn = p === "Đ" ? tf.trueBtns[idx] : tf.falseBtns[idx];
-          if (btn) dispatchClick(btn);
-        }, idx * 180);
+        const btn = p === "Đ" ? tf.trueBtns[idx] : tf.falseBtns[idx];
+        if (!btn) return;
+        const alreadyMatched =
+          initialParts[idx] === p ||
+          btn.checked === true ||
+          btn.getAttribute?.("aria-checked") === "true" ||
+          btn.getAttribute?.("aria-pressed") === "true";
+        if (alreadyMatched) return;
+
+        const scheduledAt = clickDelay;
+        clickDelay += 220;
+        clickedCount += 1;
+        scheduleManagedTimeout(() => {
+          dispatchClick(btn);
+        }, scheduledAt, epoch, requireEnabled);
       });
 
-      const lastClickAt = Math.max(0, parts.length - 1) * 180;
-      setTimeout(() => {
+      const lastClickAt = clickedCount > 0 ? Math.max(0, clickDelay - 220) : 0;
+      scheduleManagedTimeout(() => {
         const verified = EXT.detectUIAns("TRUE_FALSE", null, null, tf);
         if (verified !== parts.join("-")) {
           const verifiedParts = verified ? verified.split("-") : [];
@@ -440,16 +606,16 @@
             }
           });
           if (retried) {
-            setTimeout(finish, 180);
+            scheduleManagedTimeout(() => finish({ autoAdvanced: false }), 220, epoch, requireEnabled);
             return;
           }
         }
-        finish();
-      }, lastClickAt + POST_CLICK_VERIFY_DELAY_MS);
+        finish({ autoAdvanced: false });
+      }, lastClickAt + POST_CLICK_VERIFY_DELAY_MS, epoch, requireEnabled);
       return;
     }
 
-    finish();
+    finish({ autoAdvanced: false });
   }
 
   // =========================================================================
@@ -609,8 +775,10 @@
   // GIẢI LẠI CÂU CHỈ ĐỊNH / CÂU HIỆN TẠI (CỘNG DỒN LỊCH SỬ ĐÁP ÁN SAI)
   // =========================================================================
   async function handleManualRetryQuestion(targetQNum) {
+    cancelActiveWork();
+    const myEpoch = runEpoch;
     isProcessing = true;
-    startProcessingWatchdog("Giải lại");
+    startProcessingWatchdog("Giải lại", myEpoch);
 
     try {
       const scopeDoc = resolveTargetScopeDoc() || globalScope.document;
@@ -630,17 +798,21 @@
         }
 
         if (!targetBlock) {
-          clearProcessingWatchdog();
-          syncStatus(`⚠️ Không tìm thấy Câu ${targetQNum} trên trang!`);
-          isProcessing = false;
+          if (isRunAlive(myEpoch, false)) {
+            clearProcessingWatchdog();
+            syncStatus(`⚠️ Không tìm thấy Câu ${targetQNum} trên trang!`);
+            isProcessing = false;
+          }
           return;
         }
 
-        scrollTargetIntoCenter(targetBlock.blockEl);
+        scrollIfOffScreen(targetBlock.blockEl);
         const classified = EXT.classifyQuestionInScope(targetBlock.blockEl, true);
         if (!classified.type) {
-          clearProcessingWatchdog();
-          isProcessing = false;
+          if (isRunAlive(myEpoch, false)) {
+            clearProcessingWatchdog();
+            isProcessing = false;
+          }
           return;
         }
 
@@ -654,8 +826,11 @@
 
         syncStatus(`🔄 Đang giải lại Câu ${targetBlock.qNum} (Tránh: ${rejectedList.join(", ") || "trống"})...`);
         await waitMs(220);
+        if (!isRunAlive(myEpoch, false)) return;
 
         const images = await prepareVisualAttachments(payload, classified, true);
+        if (!isRunAlive(myEpoch, false)) return;
+
         const res = await requestNativeSolve({
           questionType: type,
           qCode: `Câu ${targetBlock.qNum}`,
@@ -672,7 +847,12 @@
           rejectedAnswers: rejectedList
         });
 
+        if (!isRunAlive(myEpoch, false)) return;
         clearProcessingWatchdog();
+        if (res?.cancelled) {
+          isProcessing = false;
+          return;
+        }
         isProcessing = false;
         if (!res?.success || !res.result) {
           syncStatus(`⚠️ Giải lại Câu ${targetBlock.qNum} thất bại: ${res?.error || "Lỗi không xác định"}`);
@@ -699,14 +879,25 @@
         });
 
         await new Promise((resolve) => {
-          applyAnswerToDOM(type, normAns, r.answerKind, mcq, shortInp, tf, () => {
-            syncStatus(
-              `✅ Đã giải lại Câu ${targetBlock.qNum}: [${oldUiAns || "?"}] ➔ [${normAns}]`,
-              `Câu ${targetBlock.qNum} (Giải lại): ${cleanExportAns}`,
-              buildMetaFromResult(`Câu ${targetBlock.qNum}`, r)
-            );
-            resolve();
-          });
+          applyAnswerToDOM(
+            type,
+            normAns,
+            r.answerKind,
+            mcq,
+            shortInp,
+            tf,
+            () => {
+              if (isRunAlive(myEpoch, false)) {
+                syncStatus(
+                  `✅ Đã giải lại Câu ${targetBlock.qNum}: [${oldUiAns || "?"}] ➔ [${normAns}]`,
+                  `Câu ${targetBlock.qNum} (Giải lại): ${cleanExportAns}`,
+                  buildMetaFromResult(`Câu ${targetBlock.qNum}`, r)
+                );
+              }
+              resolve();
+            },
+            { epoch: myEpoch, requireEnabled: false }
+          );
         });
         return;
       }
@@ -718,15 +909,18 @@
         if (targetBtn) {
           dispatchClick(targetBtn);
           await waitMs(600);
+          if (!isRunAlive(myEpoch, false)) return;
         }
       }
 
       const activeDoc = resolveTargetScopeDoc() || globalScope.document;
       const classified = EXT.classifyQuestionInScope(activeDoc, true);
       if (!classified.type) {
-        clearProcessingWatchdog();
-        syncStatus("⚠️ Không nhận diện được câu hỏi hiện tại để giải lại!");
-        isProcessing = false;
+        if (isRunAlive(myEpoch, false)) {
+          clearProcessingWatchdog();
+          syncStatus("⚠️ Không nhận diện được câu hỏi hiện tại để giải lại!");
+          isProcessing = false;
+        }
         return;
       }
 
@@ -736,14 +930,17 @@
       const bodyTxt = getVisibleBodyText(activeDoc);
       const qCode = (bodyTxt.match(/#\d{5,}/) || [])[0] || (targetQNum ? `Câu ${targetQNum}` : "Câu hiện tại");
       const cleanQuestionFull = payload.extraDetails ? `${payload.stemText}\n${payload.extraDetails}` : payload.stemText;
-      const curSig = `${qCode}_${type}_${payload.stemText.slice(0, 80)}_${payload.visualSignature.slice(0, 40)}`;
+      const curSig = computeQuestionFingerprint(type, payload);
       failCountMap.delete(curSig);
       const rejectedList = getRejectedAnswers(curSig, oldUiAns);
 
       syncStatus(`🔄 Đang giải lại ${qCode} (Tránh: ${rejectedList.join(", ") || "trống"})...`);
       await waitMs(220);
+      if (!isRunAlive(myEpoch, false)) return;
 
       const images = await prepareVisualAttachments(payload, classified, true);
+      if (!isRunAlive(myEpoch, false)) return;
+
       const res = await requestNativeSolve({
         questionType: type,
         qCode,
@@ -760,7 +957,12 @@
         rejectedAnswers: rejectedList
       });
 
+      if (!isRunAlive(myEpoch, false)) return;
       clearProcessingWatchdog();
+      if (res?.cancelled) {
+        isProcessing = false;
+        return;
+      }
       isProcessing = false;
       if (!res?.success || !res.result) {
         syncStatus(`⚠️ Giải lại ${qCode} thất bại: ${res?.error || "Lỗi không xác định"}`);
@@ -787,27 +989,40 @@
       });
 
       await new Promise((resolve) => {
-        applyAnswerToDOM(type, normAns, r.answerKind, mcq, shortInp, tf, () => {
-          syncStatus(
-            `✅ Đã giải lại ${qCode}: [${oldUiAns || "?"}] ➔ [${normAns}]`,
-            `${qCode} (Giải lại): ${cleanExportAns}`,
-            buildMetaFromResult(qCode, r)
-          );
-          resolve();
-        });
+        applyAnswerToDOM(
+          type,
+          normAns,
+          r.answerKind,
+          mcq,
+          shortInp,
+          tf,
+          () => {
+            if (isRunAlive(myEpoch, false)) {
+              syncStatus(
+                `✅ Đã giải lại ${qCode}: [${oldUiAns || "?"}] ➔ [${normAns}]`,
+                `${qCode} (Giải lại): ${cleanExportAns}`,
+                buildMetaFromResult(qCode, r)
+              );
+            }
+            resolve();
+          },
+          { epoch: myEpoch, requireEnabled: false }
+        );
       });
     } catch (err) {
-      clearProcessingWatchdog();
-      isProcessing = false;
-      syncStatus(`⚠️ Lỗi giải lại: ${err?.message || err}`);
+      if (isRunAlive(myEpoch, false)) {
+        clearProcessingWatchdog();
+        isProcessing = false;
+        syncStatus(`⚠️ Lỗi giải lại: ${err?.message || err}`);
+      }
     }
   }
 
   // =========================================================================
   // CHẾ ĐỘ DANH SÁCH NHIỀU CÂU (LIST MODE)
   // =========================================================================
-  async function processListMode(blocks) {
-    if (isProcessing || !isExtensionEnabled) return;
+  async function processListMode(blocks, myEpoch = runEpoch) {
+    if (isProcessing || !isRunAlive(myEpoch, true)) return;
 
     let task = null;
     if (typeof EXT.beginScanCache === "function") EXT.beginScanCache();
@@ -869,12 +1084,16 @@
     }
 
     isProcessing = true;
-    startProcessingWatchdog(`Câu ${task.qNum}`);
-    scrollTargetIntoCenter(task.blockEl);
+    startProcessingWatchdog(`Câu ${task.qNum}`, myEpoch);
+    scrollIfOffScreen(task.blockEl);
     syncStatus(`🧠 Đang phân tích Câu ${task.qNum}/${blocks.length} (${task.type})...`);
 
     await waitMs(40);
+    if (!isRunAlive(myEpoch, true)) return;
+
     const images = await prepareVisualAttachments(task.payload, task.classified, false);
+    if (!isRunAlive(myEpoch, true)) return;
+
     const res = await requestNativeSolve({
       questionType: task.type,
       qCode: `Câu ${task.qNum}`,
@@ -889,7 +1108,13 @@
       intelligenceMode
     });
 
+    if (!isRunAlive(myEpoch, true)) return;
     clearProcessingWatchdog();
+
+    if (res?.cancelled) {
+      isProcessing = false;
+      return;
+    }
 
     if (!res?.success || !res.result) {
       const fails = (failCountMap.get(task.qKey) || 0) + 1;
@@ -899,13 +1124,13 @@
         solvedBlockEls.add(task.blockEl);
         syncStatus(`⚠️ Câu ${task.qNum} lỗi 3 lần, tạm bỏ qua để giải tiếp câu khác...`);
         isProcessing = false;
-        if (isExtensionEnabled) setTimeout(() => processScreen(false), 150);
+        scheduleManagedTimeout(() => processScreen(false), 150, myEpoch, true);
       } else {
         syncStatus(`⚠️ Lỗi tạm thời Câu ${task.qNum} (lần ${fails}/3), thử lại sau 3.5s...`);
-        setTimeout(() => {
+        scheduleManagedTimeout(() => {
           isProcessing = false;
-          if (isExtensionEnabled) processScreen(false);
-        }, 3500);
+          processScreen(false);
+        }, 3500, myEpoch, true);
       }
       return;
     }
@@ -939,111 +1164,148 @@
       buildMetaFromResult(`Câu ${task.qNum}`, r)
     );
 
-    applyAnswerToDOM(task.type, normAns, r.answerKind, task.mcq, task.shortInp, task.tf, () => {
-      setTimeout(() => {
-        isProcessing = false;
-        if (isExtensionEnabled) processScreen(false);
-      }, 150);
-    });
+    applyAnswerToDOM(
+      task.type,
+      normAns,
+      r.answerKind,
+      task.mcq,
+      task.shortInp,
+      task.tf,
+      () => {
+        scheduleManagedTimeout(() => {
+          isProcessing = false;
+          processScreen(false);
+        }, 180, myEpoch, true);
+      },
+      { epoch: myEpoch, requireEnabled: true }
+    );
   }
 
   // =========================================================================
   // CHẾ ĐỘ TỪNG CÂU (SINGLE-STEP MODE)
   // =========================================================================
-  function findFastNextActionButton(doc, includeTraLoi = false) {
-    const nodes = doc.querySelectorAll?.("button, [role='button'], a, div, span") || [];
-    let match = null;
-    for (const el of nodes) {
-      if ((el.children?.length || 0) > 2) continue;
-      const raw = (el.textContent || el.innerText || "").trim();
-      if (raw.length === 0 || raw.length > 14) continue;
-      const t = raw.toUpperCase();
-      const isOk =
-        t === "TIẾP TỤC" ||
-        t === "TIẾP THEO" ||
-        t === "CÂU TIẾP" ||
-        t === "CÂU SAU" ||
-        (includeTraLoi && t === "TRẢ LỜI");
-      if (!isOk) continue;
-      const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
-      if (r.width === 0 || r.height === 0) continue;
-      if (EXT.isInsideNavOrChrome(el)) continue;
-      match = el;
-      if (!includeTraLoi) return el;
-    }
-    return match;
-  }
+  function advanceSingleStep(currentFingerprint, myEpoch = runEpoch, { alreadyAutoAdvanced = false } = {}) {
+    attemptedSingleQuestions.add(currentFingerprint);
+    isSelfAdvancing = true;
 
-  function advanceSingleStep(currentQKey) {
-    attemptedSingleQuestions.add(currentQKey);
+    scheduleManagedTimeout(async () => {
+      try {
+        if (!isRunAlive(myEpoch, true)) return;
+        const doc = globalScope.document;
+        if (!isQuizPage(doc, "ACTIVE")) return;
+        if (dismissSubmitModal()) return;
 
-    setTimeout(async () => {
-      if (!isExtensionEnabled || !isQuizPage()) {
-        isProcessing = false;
-        return;
-      }
-      if (dismissSubmitModal()) {
-        isProcessing = false;
-        return;
-      }
-
-      const doc = globalScope.document;
-      const snap = getVisibleBodyText(doc).slice(0, 350);
-
-      const actionBtn = findFastNextActionButton(doc, true);
-      if (actionBtn) {
-        dispatchClick(actionBtn.closest ? actionBtn.closest("button") || actionBtn : actionBtn);
-      }
-
-      await waitMs(220);
-      if (dismissSubmitModal()) {
-        isProcessing = false;
-        return;
-      }
-
-      const followUpBtn = findFastNextActionButton(doc, false);
-      if (followUpBtn) {
-        dispatchClick(followUpBtn.closest ? followUpBtn.closest("button") || followUpBtn : followUpBtn);
-      }
-
-      let changed = false;
-      for (let i = 0; i < 4; i++) {
-        await waitMs(120);
-        if (dismissSubmitModal()) {
+        const preFp = alreadyAutoAdvanced ? "__AUTO_ADVANCED__" : computeLiveQuestionFingerprint(doc);
+        if (alreadyAutoAdvanced || (preFp && preFp !== currentFingerprint)) {
+          await waitMs(350);
+          if (!isRunAlive(myEpoch, true)) return;
+          isSelfAdvancing = false;
           isProcessing = false;
+          scheduleManagedTimeout(() => processScreen(false), 180, myEpoch, true);
           return;
         }
-        const nowSnap = getVisibleBodyText(doc).slice(0, 350);
-        if (nowSnap !== snap) {
-          changed = true;
-          break;
+
+        await waitMs(260);
+        if (!isRunAlive(myEpoch, true)) return;
+        invalidateBodyTextCache();
+        if (dismissSubmitModal()) return;
+
+        const { submitBtn, nextBtn } = findActionButtons(doc);
+        let changed = false;
+
+        const waitForFingerprintChange = async (maxPolls, intervalMs, checkNextIfAppears = false) => {
+          let clickedAppearNext = false;
+          for (let i = 0; i < maxPolls; i++) {
+            await waitMs(intervalMs);
+            if (!isRunAlive(myEpoch, true)) return false;
+            invalidateBodyTextCache();
+            if (dismissSubmitModal()) return false;
+
+            const liveFp = computeLiveQuestionFingerprint(doc);
+            if (liveFp && liveFp !== currentFingerprint) {
+              return true;
+            }
+            if (checkNextIfAppears && !clickedAppearNext) {
+              const { nextBtn: appearedNext } = findActionButtons(doc);
+              if (appearedNext) {
+                clickedAppearNext = true;
+                dispatchClick(appearedNext);
+                for (let j = 0; j < 7; j++) {
+                  await waitMs(220);
+                  if (!isRunAlive(myEpoch, true)) return false;
+                  invalidateBodyTextCache();
+                  if (dismissSubmitModal()) return false;
+                  const afterNextFp = computeLiveQuestionFingerprint(doc);
+                  if (afterNextFp && afterNextFp !== currentFingerprint) {
+                    return true;
+                  }
+                }
+                return false;
+              }
+            }
+          }
+          return false;
+        };
+
+        if (submitBtn) {
+          dispatchClick(submitBtn);
+          changed = await waitForFingerprintChange(6, 220, true);
+        } else if (nextBtn) {
+          dispatchClick(nextBtn);
+          changed = await waitForFingerprintChange(8, 200, false);
         }
-      }
 
-      if (!changed) {
-        const { map, activeNum } = getNavState();
-        const maxQ = map.size > 0 ? Math.max(...map.keys()) : 0;
-        const nextNum = activeNum ? activeNum + 1 : attemptedSingleQuestions.size + 1;
+        if (!changed) {
+          if (!isRunAlive(myEpoch, true)) return;
+          invalidateBodyTextCache();
+          const liveNowFp = computeLiveQuestionFingerprint(doc);
+          const nowTxt = getVisibleBodyText(doc);
+          const isExplanation = /Đáp án đúng|Lời giải chi tiết/i.test(nowTxt);
 
-        if (maxQ > 0 && nextNum <= maxQ && map.has(nextNum)) {
-          dispatchClick(map.get(nextNum));
-        } else {
-          syncStatus("✅ Đã hoàn thành toàn bộ đề! Sẵn sàng xuất file đáp án.");
-          triggerAutoExportNotification();
+          if (!isExplanation && (!liveNowFp || liveNowFp === currentFingerprint) && isQuizPage(doc, liveNowFp ? "ACTIVE" : null)) {
+            const { map, activeNum } = getNavState();
+            const maxQ = map.size > 0 ? Math.max(...map.keys()) : 0;
+            const nextNum = activeNum !== null ? activeNum + 1 : null;
+
+            if (nextNum !== null && maxQ > 0 && nextNum <= maxQ && map.has(nextNum)) {
+              dispatchClick(map.get(nextNum));
+              await waitMs(450);
+            } else if (activeNum === null && maxQ > 0) {
+              const fallbackNum = attemptedSingleQuestions.size + 1;
+              if (fallbackNum <= maxQ && map.has(fallbackNum) && !clickedNavNums.has(fallbackNum)) {
+                clickedNavNums.add(fallbackNum);
+                dispatchClick(map.get(fallbackNum));
+                await waitMs(450);
+              } else {
+                syncStatus("✅ Đã hoàn thành toàn bộ đề! Sẵn sàng xuất file đáp án.");
+                triggerAutoExportNotification();
+                return;
+              }
+            } else {
+              syncStatus("✅ Đã hoàn thành toàn bộ đề! Sẵn sàng xuất file đáp án.");
+              triggerAutoExportNotification();
+              return;
+            }
+          }
+        }
+
+        await waitMs(300);
+        if (!isRunAlive(myEpoch, true)) return;
+      } finally {
+        if (myEpoch === runEpoch) {
+          isSelfAdvancing = false;
           isProcessing = false;
-          return;
         }
       }
-
-      isProcessing = false;
-      if (isExtensionEnabled) setTimeout(() => processScreen(false), 120);
-    }, 120);
+      scheduleManagedTimeout(() => processScreen(false), 180, myEpoch, true);
+    }, 100, myEpoch, true);
   }
 
   function processScreen(forceDiagnostic = false) {
     if (!isExtensionEnabled) return { reason: "disabled" };
     if (isProcessing && !forceDiagnostic) return { reason: "busy" };
 
+    const myEpoch = runEpoch;
     const { scopeDoc, blocks, classified } = resolveAndDetect();
     const hasAnyDetected = blocks.length >= 2 || Boolean(classified.type);
     if (!scopeDoc || !isQuizPage(scopeDoc, hasAnyDetected ? (classified.type || "LIST") : null)) {
@@ -1070,17 +1332,23 @@
     if (autoAdvanceEnabled && /Đáp án đúng|Lời giải chi tiết/i.test(bodyTxt)) {
       const nextBtn = findContinueButton(scopeDoc);
       if (nextBtn) {
+        isProcessing = true;
+        isSelfAdvancing = true;
         syncStatus("⏭️ Đang chuyển qua bước giải thích sang câu tiếp...");
-        dispatchClick(nextBtn.closest ? nextBtn.closest("button") || nextBtn : nextBtn);
-        setTimeout(() => {
-          if (isExtensionEnabled) processScreen(false);
-        }, 250);
+        dispatchClick(nextBtn);
+        scheduleManagedTimeout(() => {
+          if (myEpoch === runEpoch) {
+            isSelfAdvancing = false;
+            isProcessing = false;
+          }
+          processScreen(false);
+        }, 550, myEpoch, true);
         return { reason: "step_explanation_advanced" };
       }
     }
 
     if (blocks.length >= 2) {
-      processListMode(blocks);
+      processListMode(blocks, myEpoch);
       return { reason: "list_mode", blocks: blocks.length };
     }
 
@@ -1102,7 +1370,7 @@
     const qCode = (bodyTxt.match(/#\d{5,}/) || [])[0] || `Câu_${attemptedSingleQuestions.size + 1}`;
     const cleanQuestionFull = payload.extraDetails ? `${payload.stemText}\n${payload.extraDetails}` : payload.stemText;
 
-    const curSig = `${qCode}_${type}_${payload.stemText.slice(0, 80)}_${payload.visualSignature.slice(0, 40)}`;
+    const curSig = computeQuestionFingerprint(type, payload);
     if (!forceDiagnostic && curSig === solvedSignature) return { reason: "already_solved_sig", qCode, type };
 
     const existingUIAns = EXT.detectUIAns(type, mcq, shortInp, tf);
@@ -1116,19 +1384,26 @@
         answer: cleanExportAns
       });
       syncStatus(`Bỏ qua ${qCode} (Đã làm)`, `${qCode}: ${cleanExportAns}`);
-      if (autoAdvanceEnabled) advanceSingleStep(curSig);
+      if (autoAdvanceEnabled) {
+        isProcessing = true;
+        advanceSingleStep(curSig, myEpoch);
+      }
       return { reason: "skipped_already_answered", qCode, type };
     }
 
     isProcessing = true;
-    startProcessingWatchdog(qCode);
+    startProcessingWatchdog(qCode, myEpoch);
     solvedSignature = curSig;
     syncStatus(`🧠 Đang giải ${qCode} (${type})...`);
 
     (async () => {
       try {
         await waitMs(40);
+        if (!isRunAlive(myEpoch, true)) return;
+
         const images = await prepareVisualAttachments(payload, classified, false);
+        if (!isRunAlive(myEpoch, true)) return;
+
         const res = await requestNativeSolve({
           questionType: type,
           qCode,
@@ -1143,7 +1418,14 @@
           intelligenceMode
         });
 
+        if (!isRunAlive(myEpoch, true)) return;
         clearProcessingWatchdog();
+
+        if (res?.cancelled) {
+          isProcessing = false;
+          return;
+        }
+
         if (!res?.success || !res.result) {
           const fails = (failCountMap.get(curSig) || 0) + 1;
           failCountMap.set(curSig, fails);
@@ -1152,10 +1434,10 @@
             syncStatus("⚠️ Câu này lỗi 3 lần (kiểm tra API Key / bấm 🔍 Quét ngay hoặc chuyển câu kế)");
           } else {
             syncStatus(`⚠️ Lỗi tạm thời (lần ${fails}/3), tự thử lại sau 5s...`);
-            setTimeout(() => {
+            scheduleManagedTimeout(() => {
               solvedSignature = "";
               isProcessing = false;
-            }, 5000);
+            }, 5000, myEpoch, true);
           }
           return;
         }
@@ -1185,14 +1467,32 @@
           buildMetaFromResult(qCode, r)
         );
 
-        applyAnswerToDOM(type, normAns, r.answerKind, mcq, shortInp, tf, () => {
-          if (autoAdvanceEnabled) {
-            advanceSingleStep(curSig);
-          } else {
-            isProcessing = false;
+        applyAnswerToDOM(
+          type,
+          normAns,
+          r.answerKind,
+          mcq,
+          shortInp,
+          tf,
+          (applyOutcome) => {
+            if (!isRunAlive(myEpoch, true)) return;
+            if (autoAdvanceEnabled) {
+              advanceSingleStep(curSig, myEpoch, {
+                alreadyAutoAdvanced: Boolean(applyOutcome?.autoAdvanced)
+              });
+            } else {
+              isProcessing = false;
+            }
+          },
+          {
+            epoch: myEpoch,
+            requireEnabled: true,
+            expectedFingerprint: curSig,
+            scopeDoc
           }
-        });
+        );
       } catch (err) {
+        if (!isRunAlive(myEpoch, true)) return;
         clearProcessingWatchdog();
         isProcessing = false;
         syncStatus(`⚠️ Lỗi xử lý ${qCode}: ${err?.message || err}`);
@@ -1220,19 +1520,22 @@
     const nextKey = normalizeRouteKey(newUrl);
     if (nextKey === lastRouteKey) return { changed: false, routeKey: nextKey };
     lastRouteKey = nextKey;
-    clearProcessingWatchdog();
-    isProcessing = false;
-    solvedSignature = "";
+    invalidateBodyTextCache();
+    if (isSelfAdvancing) {
+      return { changed: true, routeKey: nextKey, deferredToAdvance: true };
+    }
+    cancelActiveWork();
     hasAutoExported = false;
     solvedListKeys.clear();
     solvedBlockEls = new WeakSet();
     skippedFailedListKeys.clear();
     failCountMap.clear();
     attemptedSingleQuestions.clear();
+    clickedNavNums.clear();
     if (isExtensionEnabled) {
-      setTimeout(() => {
-        if (isExtensionEnabled && !isProcessing) processScreen(false);
-      }, 160);
+      scheduleManagedTimeout(() => {
+        if (!isProcessing) processScreen(false);
+      }, 180, runEpoch, true);
     }
     return { changed: true, routeKey: nextKey };
   }
@@ -1241,16 +1544,13 @@
     if (typeof cfg.autoSolverEnabled === "boolean") {
       const changed = isExtensionEnabled !== cfg.autoSolverEnabled;
       isExtensionEnabled = cfg.autoSolverEnabled;
-      if (changed) {
-        if (isExtensionEnabled) {
-          solvedSignature = "";
-          isProcessing = false;
-          processScreen(false);
-        } else {
-          isProcessing = false;
-          clearProcessingWatchdog();
-          clearTimeout(debounceTimer);
-        }
+      if (!isExtensionEnabled) {
+        cancelActiveWork();
+      } else if (changed) {
+        solvedSignature = "";
+        isProcessing = false;
+        isSelfAdvancing = false;
+        processScreen(false);
       }
     }
     if (typeof cfg.autoAdvanceEnabled === "boolean") {
@@ -1262,8 +1562,7 @@
   }
 
   function forceScanNow() {
-    clearProcessingWatchdog();
-    isProcessing = false;
+    cancelActiveWork();
     solvedSignature = "";
     failCountMap.clear();
     skippedFailedListKeys.clear();
@@ -1289,12 +1588,9 @@
       globalScope.removeEventListener("hashchange", routeChangeHandler);
       routeChangeHandler = null;
     }
-    clearProcessingWatchdog();
-    clearTimeout(debounceTimer);
-    clearTimeout(maxWaitTimer);
+    cancelActiveWork();
     clearTimeout(retrySyncTimer1);
     clearTimeout(retrySyncTimer2);
-    maxWaitTimer = null;
     retrySyncTimer1 = null;
     retrySyncTimer2 = null;
   }
@@ -1310,6 +1606,8 @@
       url: globalScope.location?.href || "",
       isQuiz: isQuizPage(),
       isProcessing,
+      isSelfAdvancing,
+      runEpoch,
       isExtensionEnabled,
       configSynced,
       autoAdvanceEnabled,
@@ -1321,6 +1619,8 @@
     cleanup: cleanupSelf,
     _internalForTest: {
       applyAnswerToDOM,
+      clickMCQ,
+      advanceSingleStep,
       prepareVisualAttachments,
       processListMode,
       processScreen,
@@ -1328,9 +1628,11 @@
       getRejectedAnswers,
       syncConfigFromNative,
       getVisibleBodyText,
+      isTimerOnlyMutationList,
+      computeQuestionFingerprint,
+      getRunEpoch: () => runEpoch,
       resetState: () => {
-        clearProcessingWatchdog();
-        isProcessing = false;
+        cancelActiveWork();
         solvedSignature = "";
         configSynced = false;
         lastRouteKey = normalizeRouteKey();
@@ -1343,6 +1645,7 @@
         skippedFailedListKeys.clear();
         failCountMap.clear();
         attemptedSingleQuestions.clear();
+        clickedNavNums.clear();
         rejectedHistoryMap.clear();
       }
     }
@@ -1351,6 +1654,42 @@
   globalScope.__OnLuyenMobileAgent = agentApi;
   if (typeof module !== "undefined" && module.exports) {
     module.exports = agentApi;
+  }
+
+  function isTimerOnlyNode(node) {
+    if (!node) return false;
+    if (node.nodeType === 3) {
+      const p = node.parentElement;
+      if (!p) return false;
+      const t = (node.nodeValue || "").trim();
+      return t.length <= 16 && (/^\d{1,2}:\d{2}(:\d{2})?$/.test(t) || EXT.isInsideNavOrChrome(p));
+    }
+    if (node.nodeType === 1) {
+      const tag = (node.tagName || "").toLowerCase();
+      if (["button", "input", "textarea", "table", "li", "label", "form", "iframe"].includes(tag)) return false;
+      const txt = (node.textContent || "").trim();
+      if (txt.length <= 16 && /^\d{1,2}:\d{2}(:\d{2})?$/.test(txt)) return true;
+      return EXT.isInsideNavOrChrome(node);
+    }
+    return false;
+  }
+
+  function isTimerOnlyMutationList(mutations) {
+    if (!Array.isArray(mutations) || mutations.length === 0) return false;
+    for (const m of mutations) {
+      if (!isTimerOnlyNode(m?.target)) return false;
+      const added = m.addedNodes || [];
+      for (let i = 0; i < added.length; i++) {
+        const n = added[i];
+        if (n.nodeType === 1) {
+          const tag = (n.tagName || "").toLowerCase();
+          if (["button", "input", "textarea", "table", "li", "label", "div", "form", "iframe"].includes(tag)) {
+            return false;
+          }
+        }
+      }
+    }
+    return true;
   }
 
   // Chỉ khởi chạy Observer & Heartbeat trong môi trường trình duyệt thực (có MutationObserver)
@@ -1375,25 +1714,27 @@
       if (!configSynced) syncConfigFromNative();
     }, 1400);
 
-    const triggerDebouncedScan = () => {
+    const triggerDebouncedScan = (mutations) => {
       const curKey = normalizeRouteKey();
       if (curKey !== lastRouteKey) {
         onRouteChanged();
         return;
       }
-      if (!isExtensionEnabled || isProcessing) return;
+      if (!isExtensionEnabled || isProcessing || isSelfAdvancing) return;
+      if (isTimerOnlyMutationList(mutations)) return;
+
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         clearTimeout(maxWaitTimer);
         maxWaitTimer = null;
         processScreen(false);
-      }, 150);
+      }, 320);
       if (!maxWaitTimer) {
         maxWaitTimer = setTimeout(() => {
           maxWaitTimer = null;
           clearTimeout(debounceTimer);
           processScreen(false);
-        }, 350);
+        }, 700);
       }
     };
 
@@ -1408,9 +1749,9 @@
         onRouteChanged();
         return;
       }
-      if (isExtensionEnabled && !isProcessing) {
+      if (isExtensionEnabled && !isProcessing && !isSelfAdvancing) {
         processScreen(false);
       }
-    }, 850);
+    }, 1500);
   }
 })(typeof window !== "undefined" ? window : globalThis);

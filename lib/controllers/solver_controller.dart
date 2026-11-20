@@ -46,6 +46,7 @@ class SolverController extends ChangeNotifier {
   String _agentJs = '';
   Future<bool>? _injectFuture;
   Timer? _postLoadRecheckTimer;
+  int _sessionEpoch = 0;
 
   factory SolverController({
     required StorageService storage,
@@ -284,10 +285,16 @@ class SolverController extends ChangeNotifier {
     return null;
   }
 
-  Future<bool> ensureScriptsInjected({bool pushConfig = true}) {
+  Future<bool> ensureScriptsInjected({
+    bool pushConfig = true,
+    bool pushOnlyIfFresh = false,
+  }) {
     final existing = _injectFuture;
     if (existing != null) return existing;
-    final fut = _ensureScriptsInjectedImpl(pushConfig: pushConfig);
+    final fut = _ensureScriptsInjectedImpl(
+      pushConfig: pushConfig,
+      pushOnlyIfFresh: pushOnlyIfFresh,
+    );
     _injectFuture = fut;
     return fut.whenComplete(() {
       if (identical(_injectFuture, fut)) {
@@ -296,7 +303,10 @@ class SolverController extends ChangeNotifier {
     });
   }
 
-  Future<bool> _ensureScriptsInjectedImpl({required bool pushConfig}) async {
+  Future<bool> _ensureScriptsInjectedImpl({
+    required bool pushConfig,
+    bool pushOnlyIfFresh = false,
+  }) async {
     final ctrl = _webViewController;
     if (ctrl == null) return false;
     try {
@@ -308,17 +318,21 @@ class SolverController extends ChangeNotifier {
       final hasInject = probeMap?['i'] == true;
       final hasExtractor = probeMap?['e'] == true;
       final hasAgent = probeMap?['a'] == true;
+      var freshlyInjected = false;
 
       if (!hasInject && _injectJs.isNotEmpty) {
         await ctrl.evaluateJavascript(source: _injectJs);
+        freshlyInjected = true;
       }
       if (!hasExtractor && _extractorJs.isNotEmpty) {
         await ctrl.evaluateJavascript(source: _extractorJs);
+        freshlyInjected = true;
       }
       if (!hasAgent && _agentJs.isNotEmpty) {
         await ctrl.evaluateJavascript(source: _agentJs);
+        freshlyInjected = true;
       }
-      if (pushConfig) {
+      if (pushConfig && (!pushOnlyIfFresh || freshlyInjected)) {
         await _pushConfigToWebView();
       }
       return true;
@@ -329,10 +343,10 @@ class SolverController extends ChangeNotifier {
 
   Future<void> onPageLoadFinished(String? url) async {
     updateNavigationProgress(1.0, url);
-    await ensureScriptsInjected();
+    await ensureScriptsInjected(pushConfig: true, pushOnlyIfFresh: true);
     _postLoadRecheckTimer?.cancel();
     _postLoadRecheckTimer = Timer(const Duration(milliseconds: 500), () {
-      unawaited(ensureScriptsInjected());
+      unawaited(ensureScriptsInjected(pushConfig: true, pushOnlyIfFresh: true));
     });
   }
 
@@ -341,7 +355,7 @@ class SolverController extends ChangeNotifier {
       _currentUrl = url;
       notifyListeners();
     }
-    await ensureScriptsInjected();
+    await ensureScriptsInjected(pushConfig: true, pushOnlyIfFresh: true);
     final ctrl = _webViewController;
     if (ctrl == null) return;
     final encodedUrl = jsonEncode(url ?? '');
@@ -399,7 +413,20 @@ class SolverController extends ChangeNotifier {
     } catch (_) {}
   }
 
+  @visibleForTesting
+  bool get isSessionActive => _state.enabled;
+
+  @visibleForTesting
+  Future<Map<String, dynamic>> handleSolveQuizForTest(Map<String, dynamic> rawMap) =>
+      _handleSolveQuiz(rawMap);
+
+  @visibleForTesting
+  void handleJsSyncStatusForTest(Map<String, dynamic> data) => _handleJsSyncStatus(data);
+
   void _handleJsSyncStatus(Map<String, dynamic> data) {
+    if (!_state.enabled) {
+      return;
+    }
     final statusTxt = (data['solverStatus'] ?? '').toString();
     final lastAns = data['lastSolvedAnswer']?.toString();
     final rawMeta = data['lastSolvedMeta'];
@@ -408,8 +435,6 @@ class SolverController extends ChangeNotifier {
     var nextPill = _state.pillState;
     if (!_state.hasKeys) {
       nextPill = PillVisualState.noKey;
-    } else if (!_state.enabled) {
-      nextPill = PillVisualState.paused;
     } else if (statusTxt.contains('⚠️') || statusTxt.contains('thất bại') || statusTxt.contains('Lỗi')) {
       nextPill = PillVisualState.error;
     } else if (statusTxt.contains('🧠') || statusTxt.contains('Đang giải') || statusTxt.contains('🔄')) {
@@ -443,11 +468,19 @@ class SolverController extends ChangeNotifier {
     }
 
     final req = QuizSolveRequest.fromJson(rawMap);
+    if (!_state.enabled && !req.isManualRetry) {
+      return {'success': false, 'cancelled': true, 'error': 'Mod đang tắt'};
+    }
+
+    final myEpoch = _sessionEpoch;
+    bool isCancelled() => myEpoch != _sessionEpoch || (!_state.enabled && !req.isManualRetry);
+
     try {
       final result = await multiAgentSolver.solve(
         req,
         keys,
         onStage: (stage, message) {
+          if (isCancelled()) return;
           _state = _state.copyWith(
             pillState: stage,
             statusText: message,
@@ -455,6 +488,10 @@ class SolverController extends ChangeNotifier {
           notifyListeners();
         },
       );
+
+      if (isCancelled()) {
+        return {'success': false, 'cancelled': true, 'error': 'Đã hủy do tắt Mod'};
+      }
 
       final meta = SolverMeta(
         qLabel: req.qCode,
@@ -484,6 +521,9 @@ class SolverController extends ChangeNotifier {
         'result': result.toJson(),
       };
     } catch (e) {
+      if (isCancelled()) {
+        return {'success': false, 'cancelled': true, 'error': 'Đã hủy'};
+      }
       final errMsg = e.toString().replaceFirst('Exception: ', '');
       _state = _state.copyWith(
         pillState: PillVisualState.error,
@@ -520,6 +560,9 @@ class SolverController extends ChangeNotifier {
 
   Future<void> toggleEnabled([bool? forceValue]) async {
     final next = forceValue ?? !_state.enabled;
+    if (!next) {
+      _sessionEpoch += 1;
+    }
     if (next && !_state.hasKeys) {
       await storage.saveEnabled(false);
       _state = _state.copyWith(
@@ -549,6 +592,7 @@ class SolverController extends ChangeNotifier {
   }
 
   Future<void> hideAndDisableMod() async {
+    _sessionEpoch += 1;
     await storage.saveEnabled(false);
     _state = _state.copyWith(
       enabled: false,
@@ -607,6 +651,7 @@ class SolverController extends ChangeNotifier {
     if (!_state.enabled) {
       await toggleEnabled(true);
     }
+    _sessionEpoch += 1;
     await ensureScriptsInjected();
     _state = _state.copyWith(
       pillState: PillVisualState.scanning,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -123,6 +124,58 @@ void main() {
       expect(attempts404.length, 2);
       expect(attempts404[0].startsWith('${kPrimaryModels[0]}::'), isTrue);
       expect(attempts404[1].startsWith('${kPrimaryModels[1]}::'), isTrue);
+    });
+
+    test('Disabling Mod cancels in-flight solveQuiz and blocks stale JS syncStatus updates', () async {
+      SharedPreferences.setMockInitialValues({});
+      final storage = StorageService();
+      final requestSent = Completer<void>();
+      final finishResponse = Completer<void>();
+
+      final mockClient = GeminiClient(
+        httpClient: MockClient((request) async {
+          if (!requestSent.isCompleted) requestSent.complete();
+          await finishResponse.future;
+          return _geminiOkResponse('C');
+        }),
+      );
+
+      final controller = SolverController(
+        storage: storage,
+        geminiClient: mockClient,
+      );
+      await controller.init();
+      await controller.addApiKeys(rawKeysInput: 'dummy_key_alpha_0001');
+      await controller.toggleEnabled(true);
+      expect(controller.isSessionActive, isTrue);
+
+      final solveFuture = controller.handleSolveQuizForTest({
+        'questionType': 'MCQ',
+        'qCode': 'Câu 1',
+        'rawScreenText': 'Chọn đáp án đúng?',
+        'intelligenceMode': 'fast',
+      });
+
+      await requestSent.future;
+      // Tắt Mod trong khi request AI đang chờ phản hồi
+      await controller.toggleEnabled(false);
+      expect(controller.state.enabled, isFalse);
+      expect(controller.state.pillState, PillVisualState.paused);
+
+      // Các ping syncStatus trễ từ JS phải bị bỏ qua khi Mod đã tắt
+      controller.handleJsSyncStatusForTest({
+        'solverStatus': '🧠 Đang giải Câu 1...',
+        'lastSolvedAnswer': 'Câu 1: A',
+      });
+      expect(controller.state.pillState, PillVisualState.paused);
+
+      // Response AI về muộn không được ghi đè trạng thái paused
+      finishResponse.complete();
+      final res = await solveFuture;
+      expect(res['cancelled'], isTrue);
+      expect(res['success'], isFalse);
+      expect(controller.state.enabled, isFalse);
+      expect(controller.state.pillState, PillVisualState.paused);
     });
   });
 }
