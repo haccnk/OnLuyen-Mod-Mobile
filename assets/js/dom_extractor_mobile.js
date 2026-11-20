@@ -1643,7 +1643,7 @@
     const stemVisuals = [];
     let stemText = serializeAcademicDOM(container, { excludeNodes, collectVisuals: stemVisuals });
     stemText = stemText
-      .replace(/^Câu\s+\d+\s*[:\.]?\s*/i, "")
+      .replace(/^Câu\s*[:\.\-]?\s*\d+\s*[:\.\-]?\s*/i, "")
       .replace(/Đáp án của bạn\s*/gi, "")
       .trim();
 
@@ -2034,21 +2034,38 @@
     }
 
     if (type === "MCQ" && mcq?.length === 4) {
-      const explicitIdx = mcq.findIndex(
-        (c) =>
+      const hasActiveInChoice = (c) => {
+        const badgeParent =
+          c.badgeEl?.parentElement && c.badgeEl.parentElement !== c.rowEl ? c.badgeEl.parentElement : null;
+        return (
           hasExplicitCheckedAttr(c.badgeEl) ||
           hasExplicitCheckedAttr(c.rowEl) ||
           hasExplicitActiveClass(c.badgeEl) ||
+          hasExplicitActiveClass(badgeParent) ||
           hasExplicitActiveClass(c.rowEl) ||
-          /Đáp án của bạn/i.test(getText(c.rowEl))
-      );
-      if (explicitIdx !== -1) {
-        const allSame = mcq.every((c) => hasExplicitActiveClass(c.rowEl)) && !hasExplicitCheckedAttr(mcq[explicitIdx].rowEl);
-        if (!allSame) return mcq[explicitIdx].letter;
+          /Đáp án của bạn/i.test(getText(c.rowEl)) ||
+          Boolean(
+            c.rowEl?.querySelector?.(
+              '[aria-checked="true"], [aria-pressed="true"], .active, .selected, .checked, .is-selected, .is-active, .ant-radio-checked, .ant-radio-wrapper-checked'
+            )
+          )
+        );
+      };
+
+      const explicitMatches = mcq.filter(hasActiveInChoice);
+      if (explicitMatches.length === 1) {
+        return explicitMatches[0].letter;
       }
 
       const badgeOutlier = findUniqueOutlierIndex(mcq.map((c) => getStyleSignature(c.badgeEl)));
       if (badgeOutlier !== -1) return mcq[badgeOutlier].letter;
+
+      if (mcq.some((c) => c.badgeEl?.parentElement)) {
+        const badgeParentOutlier = findUniqueOutlierIndex(
+          mcq.map((c) => getStyleSignature(c.badgeEl?.parentElement || c.rowEl))
+        );
+        if (badgeParentOutlier !== -1) return mcq[badgeParentOutlier].letter;
+      }
 
       const rowOutlier = findUniqueOutlierIndex(mcq.map((c) => getStyleSignature(c.rowEl)));
       if (rowOutlier !== -1) return mcq[rowOutlier].letter;
@@ -2109,8 +2126,10 @@
 
   function getMultiBlocks(root = document) {
     const map = new Map();
-    const HEADER_EXACT_RE = /^(?:Câu(?:\s+hỏi)?|Question)\s+(\d+)(?:\s*\([^)]*\))?\s*[:\.\-]?$/i;
-    const HEADER_PREFIX_RE = /^(?:Câu(?:\s+hỏi)?|Question)\s+(\d+)(?:\s*\([^)]*\))?\s*[:\.]/i;
+    const HEADER_EXACT_RE =
+      /^(?:Câu(?:\s+hỏi)?|Question)\s*[:\.\-]?\s*(\d+)(?:\s*\([^)]*\))?(?:\s*#\d{4,})?\s*[:\.\-]?$/i;
+    const HEADER_PREFIX_RE =
+      /^(?:Câu(?:\s+hỏi)?|Question)\s*[:\.\-]?\s*(\d+)(?:\s*\([^)]*\))?(?:\s*(?:[:\.\-|]|#\d{4,}))/i;
 
     const nodes = root.querySelectorAll?.("b, strong, span, div, p, h1, h2, h3, h4, h5") || [];
     for (const el of nodes) {

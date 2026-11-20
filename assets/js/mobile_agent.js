@@ -35,6 +35,7 @@
   let _cachedBodyTxt = "";
   let _cachedBodyTxtAt = 0;
   let _cachedBodyDoc = null;
+  let lastClickInfo = null;
 
   const managedTimers = new Set();
   const solvedListKeys = new Set();
@@ -81,6 +82,7 @@
     runEpoch += 1;
     isProcessing = false;
     isSelfAdvancing = false;
+    lastClickInfo = null;
     clearProcessingWatchdog();
     clearAllManagedTimers();
     invalidateBodyTextCache();
@@ -264,13 +266,27 @@
     for (const el of nodes) {
       if ((el.children?.length || 0) > 2) continue;
       const raw = (el.textContent || el.innerText || "").trim();
-      if (raw.length === 0 || raw.length > 16) continue;
-      const t = raw.toUpperCase();
+      if (raw.length === 0 || raw.length > 24) continue;
+      const t = raw.replace(/[←→➔▸▶›»<>]+/g, "").trim().toUpperCase();
+      if (!t || t.length > 18) continue;
+
       const isSubmit = t === "TRẢ LỜI" || t === "KIỂM TRA" || t === "XÁC NHẬN";
-      const isNext = t === "TIẾP TỤC" || t === "TIẾP THEO" || t === "CÂU TIẾP" || t === "CÂU SAU";
+      const clickTarget = el.closest ? el.closest("button, [role='button'], a") || el : el;
+      const targetTag = (clickTarget.tagName || "").toLowerCase();
+      const isControlTarget = targetTag === "button" || targetTag === "a" || clickTarget.getAttribute?.("role") === "button";
+      const isShortNext = isControlTarget && (t === "TIẾP" || t === "SAU" || t === "NEXT");
+      const isNext =
+        t === "TIẾP TỤC" ||
+        t === "TIẾP THEO" ||
+        t === "CÂU TIẾP" ||
+        t === "CÂU TIẾP THEO" ||
+        t === "CÂU SAU" ||
+        t === "CÂU KẾ" ||
+        t === "CÂU KẾ TIẾP" ||
+        isShortNext;
+
       if (!isSubmit && !isNext) continue;
       if (EXT.isEffectivelyHidden?.(el) || EXT.isInsideNavOrChrome(el)) continue;
-      const clickTarget = el.closest ? el.closest("button, [role='button']") || el : el;
       if (isDisabledButton(el) || isDisabledButton(clickTarget)) continue;
       const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
       if (r.width === 0 || r.height === 0) continue;
@@ -279,6 +295,38 @@
       if (isNext && !nextBtn) nextBtn = clickTarget;
       if (submitBtn && nextBtn) break;
     }
+
+    if (!nextBtn && doc?.querySelectorAll) {
+      const iconControls = doc.querySelectorAll("button, [role='button'], a") || [];
+      for (const el of iconControls) {
+        if (EXT.isEffectivelyHidden?.(el) || EXT.isInsideNavOrChrome(el)) continue;
+        if (isDisabledButton(el)) continue;
+        const raw = (el.textContent || el.innerText || "").trim();
+        const aria = (el.getAttribute?.("aria-label") || "").trim();
+        const title = (el.getAttribute?.("title") || "").trim();
+        const cls = String(el.className || "");
+        const combined = `${raw} ${aria} ${title} ${cls}`;
+        if (/(trước|lùi|quay lại|nộp|prev|back|submit|top|up)/i.test(combined)) continue;
+
+        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { top: 0, width: 0, height: 0 };
+        if (r.width === 0 || r.height === 0) continue;
+
+        const hasNextLabel = /(câu\s*(sau|tiếp|kế)|tiếp\s*(theo|tục)|next)/i.test(`${aria} ${title}`);
+        const hasNextClass = /(next-question|btn-next|next-btn|quiz-next|arrow-next)/i.test(cls);
+        const hasRightChevron =
+          r.top > 120 &&
+          Boolean(
+            el.querySelector?.(
+              ".fa-chevron-right, .fa-angle-right, .fa-arrow-right, .anticon-right, .mdi-chevron-right, .icon-next"
+            )
+          );
+        if (hasNextLabel || hasNextClass || hasRightChevron) {
+          nextBtn = el;
+          break;
+        }
+      }
+    }
+
     return { submitBtn, nextBtn };
   }
 
@@ -408,28 +456,93 @@
     return false;
   }
 
-  function pickBestMcqClickTarget(c) {
-    if (!c) return { primary: null, alternate: null };
-    const inner = c.rowEl?.querySelector?.('input[type="radio"], [role="radio"], button, label') || null;
-    const primary = inner || c.rowEl || c.badgeEl || null;
-    let alternate = null;
-    if (c.rowEl && primary !== c.rowEl) {
-      alternate = c.rowEl;
-    } else if (c.badgeEl && primary !== c.badgeEl) {
-      alternate = c.badgeEl;
-    } else {
-      alternate = c.rowEl || c.badgeEl || null;
+  function isVisibleInteractiveChoiceChild(el, c) {
+    if (!el || isDisabledButton(el) || EXT.isEffectivelyHidden?.(el)) return false;
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "input" || el.getAttribute?.("role") === "radio") {
+      return true;
     }
-    return { primary, alternate };
+    const containsBadge = Boolean(c.badgeEl && typeof el.contains === "function" && el.contains(c.badgeEl));
+    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+    return containsBadge || r.width >= 60;
   }
 
-  function clickMCQ(c, { useAlternate = false } = {}) {
-    if (!c) return;
-    const { primary, alternate } = pickBestMcqClickTarget(c);
-    const target = useAlternate ? (alternate || primary) : primary;
-    if (!target) return;
+  function getMcqClickCandidates(c) {
+    if (!c) return [];
+    const out = [];
+    const docBody = globalScope.document?.body;
+    const docHtml = globalScope.document?.documentElement;
+    const addUnique = (el) => {
+      if (!el || el === docBody || el === docHtml) return;
+      if (!out.includes(el)) out.push(el);
+    };
+
+    // 1. Control tương tác thực sự trong rowEl (bỏ qua icon/tooltip nhỏ)
+    const innerControls = Array.from(
+      c.rowEl?.querySelectorAll?.('input[type="radio"], [role="radio"], button, label') || []
+    );
+    for (const ctrl of innerControls) {
+      if (isVisibleInteractiveChoiceChild(ctrl, c)) {
+        addUnique(ctrl);
+        break;
+      }
+    }
+
+    // 2. Đi ngược từ badgeEl lên trong phạm vi rowEl tìm card clickable (.answer-card / cursor:pointer)
+    const canWalkInsideRow =
+      c.badgeEl &&
+      c.rowEl &&
+      c.badgeEl !== c.rowEl &&
+      typeof c.rowEl.contains === "function" &&
+      c.rowEl.contains(c.badgeEl);
+
+    if (canWalkInsideRow) {
+      let cur = c.badgeEl.parentElement;
+      let foundCard = null;
+      while (cur && cur !== c.rowEl && cur !== docBody && cur !== docHtml) {
+        let isPointer = false;
+        try {
+          const cs = typeof globalScope.getComputedStyle === "function" ? globalScope.getComputedStyle(cur) : cur.style;
+          if (cs && cs.cursor === "pointer") isPointer = true;
+        } catch (e) {}
+        const cls = String(cur.className || "");
+        if (
+          isPointer ||
+          cur.getAttribute?.("role") === "button" ||
+          typeof cur.onclick === "function" ||
+          /(answer|option|choice|item|card|box)/i.test(cls)
+        ) {
+          foundCard = cur;
+          break;
+        }
+        cur = cur.parentElement;
+      }
+      if (foundCard) {
+        addUnique(foundCard);
+      } else if (c.badgeEl.parentElement && c.badgeEl.parentElement !== c.rowEl) {
+        addUnique(c.badgeEl.parentElement);
+      }
+    }
+
+    // 3. badgeEl
+    if (c.badgeEl) addUnique(c.badgeEl);
+
+    // 4. rowEl và input dự phòng (Antd opacity:0)
+    if (c.rowEl) addUnique(c.rowEl);
+    const fallbackInput = c.rowEl?.querySelector?.('input[type="radio"]');
+    if (fallbackInput) addUnique(fallbackInput);
+
+    return out;
+  }
+
+  function clickMCQ(c, { candidateIndex = 0 } = {}) {
+    if (!c) return null;
+    const candidates = getMcqClickCandidates(c);
+    const target = candidates[candidateIndex] || candidates[0] || null;
+    if (!target) return null;
     scrollIfOffScreen(c.rowEl || target);
     dispatchClick(target, { scroll: false });
+    return target;
   }
 
   function fillInput(inputEl, rawVal, answerKind, cb, opts = {}) {
@@ -531,32 +644,75 @@
     if (type === "MCQ" && ansStr) {
       const idx = ansStr.charCodeAt(0) - 65;
       if (mcq[idx]) {
-        clickMCQ(mcq[idx], { useAlternate: false });
-        scheduleManagedTimeout(() => {
-          const rowEl = mcq[idx].rowEl;
-          const rowDetached =
-            rowEl &&
-            (rowEl.isConnected === false ||
-              (typeof scopeDoc?.body?.contains === "function" && !scopeDoc.body.contains(rowEl)));
-          if (rowDetached) {
-            finish({ autoAdvanced: true });
+        const rawCandidates = getMcqClickCandidates(mcq[idx]);
+        const candidates = rawCandidates.length === 1 ? [rawCandidates[0], rawCandidates[0]] : rawCandidates;
+        const tryCandidate = (candIdx, attemptsSoFar) => {
+          const target = candidates[candIdx];
+          if (!target) {
+            lastClickInfo = { ans: ansStr, attempts: attemptsSoFar, verified: false, targetTag: "" };
+            finish({ autoAdvanced: false, verified: false });
             return;
           }
-          if (expectedFingerprint) {
-            const liveFp = computeLiveQuestionFingerprint(scopeDoc);
-            if (liveFp && liveFp !== expectedFingerprint) {
-              finish({ autoAdvanced: true });
+          scrollIfOffScreen(mcq[idx].rowEl || target);
+          dispatchClick(target, { scroll: false });
+          const nextAttempts = attemptsSoFar + 1;
+          const waitDelay = candIdx === 0 ? POST_CLICK_VERIFY_DELAY_MS : 250;
+
+          scheduleManagedTimeout(() => {
+            const rowEl = mcq[idx].rowEl;
+            const rowDetached =
+              rowEl &&
+              (rowEl.isConnected === false ||
+                (typeof scopeDoc?.body?.contains === "function" && !scopeDoc.body.contains(rowEl)));
+            if (rowDetached) {
+              lastClickInfo = {
+                ans: ansStr,
+                attempts: nextAttempts,
+                verified: true,
+                targetTag: target.tagName || ""
+              };
+              finish({ autoAdvanced: true, verified: true });
               return;
             }
-          }
-          const nowSelected = EXT.detectUIAns("MCQ", mcq, null, null);
-          if (nowSelected !== ansStr) {
-            clickMCQ(mcq[idx], { useAlternate: true });
-            scheduleManagedTimeout(() => finish({ autoAdvanced: false }), 220, epoch, requireEnabled);
-          } else {
-            finish({ autoAdvanced: false });
-          }
-        }, POST_CLICK_VERIFY_DELAY_MS, epoch, requireEnabled);
+            if (expectedFingerprint) {
+              const liveFp = computeLiveQuestionFingerprint(scopeDoc);
+              if (liveFp && liveFp !== expectedFingerprint) {
+                lastClickInfo = {
+                  ans: ansStr,
+                  attempts: nextAttempts,
+                  verified: true,
+                  targetTag: target.tagName || ""
+                };
+                finish({ autoAdvanced: true, verified: true });
+                return;
+              }
+            }
+            const nowSelected = EXT.detectUIAns("MCQ", mcq, null, null);
+            if (nowSelected === ansStr) {
+              lastClickInfo = {
+                ans: ansStr,
+                attempts: nextAttempts,
+                verified: true,
+                targetTag: target.tagName || ""
+              };
+              finish({ autoAdvanced: false, verified: true });
+              return;
+            }
+            if (candIdx + 1 < Math.min(candidates.length, 3)) {
+              tryCandidate(candIdx + 1, nextAttempts);
+              return;
+            }
+            lastClickInfo = {
+              ans: ansStr,
+              attempts: nextAttempts,
+              verified: false,
+              targetTag: target.tagName || ""
+            };
+            finish({ autoAdvanced: false, verified: false });
+          }, waitDelay, epoch, requireEnabled);
+        };
+
+        tryCandidate(0, 0);
         return;
       }
     } else if (type === "SHORT_ANSWER" && ansStr !== "") {
@@ -1184,7 +1340,11 @@
   // =========================================================================
   // CHẾ ĐỘ TỪNG CÂU (SINGLE-STEP MODE)
   // =========================================================================
-  function advanceSingleStep(currentFingerprint, myEpoch = runEpoch, { alreadyAutoAdvanced = false } = {}) {
+  function advanceSingleStep(
+    currentFingerprint,
+    myEpoch = runEpoch,
+    { alreadyAutoAdvanced = false, qLabel = "" } = {}
+  ) {
     attemptedSingleQuestions.add(currentFingerprint);
     isSelfAdvancing = true;
 
@@ -1276,14 +1436,23 @@
                 clickedNavNums.add(fallbackNum);
                 dispatchClick(map.get(fallbackNum));
                 await waitMs(450);
-              } else {
+              } else if (attemptedSingleQuestions.size >= maxQ) {
                 syncStatus("✅ Đã hoàn thành toàn bộ đề! Sẵn sàng xuất file đáp án.");
                 triggerAutoExportNotification();
                 return;
+              } else {
+                syncStatus(`✅ Đã chọn ${qLabel || "câu hiện tại"} — Chưa thấy nút chuyển câu, hãy tự chuyển câu tiếp`);
+                return;
               }
-            } else {
+            } else if (
+              maxQ > 0 &&
+              ((activeNum !== null && activeNum >= maxQ) || attemptedSingleQuestions.size >= maxQ)
+            ) {
               syncStatus("✅ Đã hoàn thành toàn bộ đề! Sẵn sàng xuất file đáp án.");
               triggerAutoExportNotification();
+              return;
+            } else {
+              syncStatus(`✅ Đã chọn ${qLabel || "câu hiện tại"} — Chưa thấy nút chuyển câu, hãy tự chuyển câu tiếp`);
               return;
             }
           }
@@ -1386,7 +1555,7 @@
       syncStatus(`Bỏ qua ${qCode} (Đã làm)`, `${qCode}: ${cleanExportAns}`);
       if (autoAdvanceEnabled) {
         isProcessing = true;
-        advanceSingleStep(curSig, myEpoch);
+        advanceSingleStep(curSig, myEpoch, { qLabel: qCode });
       }
       return { reason: "skipped_already_answered", qCode, type };
     }
@@ -1478,7 +1647,8 @@
             if (!isRunAlive(myEpoch, true)) return;
             if (autoAdvanceEnabled) {
               advanceSingleStep(curSig, myEpoch, {
-                alreadyAutoAdvanced: Boolean(applyOutcome?.autoAdvanced)
+                alreadyAutoAdvanced: Boolean(applyOutcome?.autoAdvanced),
+                qLabel: qCode
               });
             } else {
               isProcessing = false;
@@ -1608,6 +1778,7 @@
       isProcessing,
       isSelfAdvancing,
       runEpoch,
+      lastClick: lastClickInfo,
       isExtensionEnabled,
       configSynced,
       autoAdvanceEnabled,
@@ -1620,6 +1791,8 @@
     _internalForTest: {
       applyAnswerToDOM,
       clickMCQ,
+      getMcqClickCandidates,
+      findActionButtons,
       advanceSingleStep,
       prepareVisualAttachments,
       processListMode,
@@ -1634,6 +1807,7 @@
       resetState: () => {
         cancelActiveWork();
         solvedSignature = "";
+        lastClickInfo = null;
         configSynced = false;
         lastRouteKey = normalizeRouteKey();
         isExtensionEnabled = true;

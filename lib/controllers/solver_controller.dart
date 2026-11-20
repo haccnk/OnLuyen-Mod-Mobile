@@ -389,6 +389,15 @@ class SolverController extends ChangeNotifier {
   }
 
   Future<void> reloadWebView() async {
+    _completionBannerMessage = null;
+    _sessionEpoch += 1;
+    if (_state.enabled) {
+      _state = _state.copyWith(
+        pillState: PillVisualState.idle,
+        statusText: '🔍 Đang tải lại và quét trang...',
+      );
+    }
+    notifyListeners();
     await _webViewController?.reload();
   }
 

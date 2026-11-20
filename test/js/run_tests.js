@@ -1439,6 +1439,185 @@ test("31. MutationObserver bỏ qua nhịp đồng hồ đếm ngược (00:44:5
   assert.strictEqual(AGENT._internalForTest.isTimerOnlyMutationList(realQuestionMutation), false);
 });
 
+test("32. getMultiBlocks bắt định dạng 'Câu: 1 #13153797' và extractQuestionPayload cắt sạch tiền tố 'Câu: 1'", () => {
+  const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  const { EXT } = loadModulesInEnv(env);
+
+  const makeBlock = (num, code, stem, optLabel) => {
+    const opts = ["A", "B", "C", "D"].map((L, idx) =>
+      el(doc, "div", { rect: { top: 200 + num * 300 + idx * 45, left: 12, width: 350, height: 38 } }, [
+        el(doc, "span", { text: L, rect: { top: 200 + num * 300 + idx * 45, left: 16, width: 22, height: 22 } }),
+        el(doc, "span", { text: `${optLabel} ${L}`, rect: { top: 200 + num * 300 + idx * 45, left: 46, width: 240, height: 24 } })
+      ])
+    );
+    return el(doc, "div", { rect: { top: 80 + num * 300, left: 10, width: 370, height: 280 } }, [
+      el(doc, "div", { text: `Câu: ${num} #${code} | Báo lỗi`, rect: { top: 80 + num * 300, left: 10, width: 340, height: 24 } }),
+      el(doc, "p", { text: stem }),
+      ...opts
+    ]);
+  };
+
+  doc.body.appendChild(makeBlock(1, "13153797", "Cho tập hợp A, tìm B\\A.", "Tập"));
+  doc.body.appendChild(makeBlock(2, "13153798", "Tính giá trị biểu thức M.", "Số"));
+
+  const blocks = EXT.getMultiBlocks(doc);
+  assert.strictEqual(blocks.length, 2);
+  assert.strictEqual(blocks[0].qNum, 1);
+  assert.strictEqual(blocks[1].qNum, 2);
+
+  const cls1 = EXT.classifyQuestionInScope(blocks[0].blockEl, true);
+  const payload1 = EXT.extractQuestionPayload(blocks[0].blockEl, cls1);
+  assert.ok(payload1.stemText.includes("Cho tập hợp A"));
+  assert.ok(!/^Câu\s*:\s*1/i.test(payload1.stemText));
+});
+
+test("33. Angular card lồng nhau (.col-12 > .answer-card[cursor:pointer] > .badge): chọn đúng 1 click & fallback cascade", async () => {
+  // 33a: badge C nằm trong .answer-card (rowEl là .col-12), click đúng .answer-card ngay lần đầu
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const { EXT, AGENT } = loadModulesInEnv(env, async () => null);
+    let cardCClicks = 0;
+
+    const listWrap = el(doc, "div", { rect: { top: 140, left: 10, width: 370, height: 260 } });
+    ["A", "B", "C", "D"].forEach((L, i) => {
+      const y = 150 + i * 55;
+      const badge = el(doc, "span", { className: "badge", text: L, rect: { top: y + 10, left: 22, width: 24, height: 24 } });
+      const card = el(doc, "div", {
+        className: "answer-card",
+        cs: { cursor: "pointer" },
+        rect: { top: y, left: 14, width: 350, height: 48 }
+      }, [
+        badge,
+        el(doc, "span", { text: `Nội dung ${L}`, rect: { top: y + 10, left: 56, width: 200, height: 24 } })
+      ]);
+      if (L === "C") {
+        card.addEventListener("click", () => {
+          cardCClicks += 1;
+          card.setAttribute("class", "answer-card selected");
+        });
+      }
+      const col = el(doc, "div", { className: "col-12", rect: { top: y, left: 10, width: 366, height: 50 } }, [
+        card,
+        el(doc, "span", { text: "helper", rect: { top: y, left: 360, width: 4, height: 4 } })
+      ]);
+      listWrap.appendChild(col);
+    });
+    doc.body.appendChild(el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 360 } }, ["Đề:", listWrap]));
+
+    const cls = EXT.classifyQuestionInScope(doc, true);
+    assert.strictEqual(cls.type, "MCQ");
+    const outcome = await new Promise((resolve) => {
+      AGENT._internalForTest.applyAnswerToDOM("MCQ", "C", null, cls.mcq, null, null, resolve);
+    });
+    assert.strictEqual(cardCClicks, 1, "Chỉ click 1 lần đúng vào .answer-card");
+    assert.strictEqual(outcome.verified, true);
+    assert.strictEqual(EXT.detectUIAns("MCQ", cls.mcq, null, null), "C");
+  }
+
+  // 33b: Có thẻ <label> lớn bên trong .col-12 không bắt sự kiện -> cascade tự chuyển xuống .answer-card và vẫn chọn đúng C
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const origSetTimeout = global.setTimeout;
+    const { EXT, AGENT, sandbox } = loadModulesInEnv(env, async () => null);
+    sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 10)));
+    let decoyClicks = 0;
+    let cardCClicks = 0;
+
+    const listWrap = el(doc, "div", { rect: { top: 140, left: 10, width: 370, height: 260 } });
+    ["A", "B", "C", "D"].forEach((L, i) => {
+      const y = 150 + i * 55;
+      const badge = el(doc, "span", { className: "badge", text: L, rect: { top: y + 10, left: 22, width: 24, height: 24 } });
+      const card = el(doc, "div", {
+        className: "answer-card",
+        cs: { cursor: "pointer" },
+        rect: { top: y, left: 14, width: 350, height: 48 }
+      }, [
+        badge,
+        el(doc, "span", { text: `Phương án ${L}`, rect: { top: y + 10, left: 56, width: 200, height: 24 } })
+      ]);
+      const decoyLbl = el(doc, "label", { text: "", rect: { top: y, left: 14, width: 120, height: 24 } });
+      if (L === "C") {
+        decoyLbl.addEventListener("click", () => {
+          decoyClicks += 1; // không thêm selected
+        });
+        card.addEventListener("click", () => {
+          cardCClicks += 1;
+          card.setAttribute("class", "answer-card selected");
+        });
+      }
+      const col = el(doc, "div", { className: "col-12", rect: { top: y, left: 10, width: 366, height: 50 } }, [
+        decoyLbl,
+        card
+      ]);
+      listWrap.appendChild(col);
+    });
+    doc.body.appendChild(el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 360 } }, ["Đề:", listWrap]));
+
+    const cls = EXT.classifyQuestionInScope(doc, true);
+    const outcome = await new Promise((resolve) => {
+      AGENT._internalForTest.applyAnswerToDOM("MCQ", "C", null, cls.mcq, null, null, resolve);
+    });
+    assert.strictEqual(decoyClicks, 1);
+    assert.strictEqual(cardCClicks, 1);
+    assert.strictEqual(outcome.verified, true);
+    assert.strictEqual(EXT.detectUIAns("MCQ", cls.mcq, null, null), "C");
+  }
+});
+
+test("34. Single-Step khi chưa thấy nút chuyển & maxQ=0 không báo hoàn thành giả; findActionButtons bắt 'Câu tiếp theo' & icon-only", async () => {
+  const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  const origSetTimeout = global.setTimeout;
+  let completedEvents = 0;
+  const statuses = [];
+
+  const loaded = loadModulesInEnv(env, async (handler, args) => {
+    if (handler === "onQuizCompleted") completedEvents += 1;
+    if (handler === "syncStatus") statuses.push(args?.solverStatus || "");
+    if (handler === "solveQuiz") {
+      return { success: true, result: { normalizedAns: "A", confidence: 96 } };
+    }
+    return null;
+  });
+  loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+  loaded.AGENT._internalForTest.resetState();
+
+  const opts = ["A", "B", "C", "D"].map((L, i) => {
+    const b = el(doc, "button", { text: `${L}. Lựa chọn ${L}`, rect: { top: 150 + i * 50, left: 10, width: 340, height: 42 } });
+    b.addEventListener("click", () => b.setAttribute("class", "selected"));
+    return b;
+  });
+  doc.body.appendChild(el(doc, "div", { rect: { top: 80, left: 10, width: 360, height: 350 } }, ["Câu: 1 #13153797", ...opts]));
+
+  loaded.AGENT._internalForTest.processScreen(false);
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => origSetTimeout(r, 15));
+    if (!loaded.AGENT.getDiagnostics().isProcessing && !loaded.AGENT.getDiagnostics().isSelfAdvancing) break;
+  }
+  loaded.AGENT.cleanup();
+
+  assert.strictEqual(completedEvents, 0, "Không được bắn onQuizCompleted giả ở Câu 1 khi không thấy nút chuyển & maxQ=0");
+  assert.ok(!statuses.some((s) => s.includes("Đã hoàn thành toàn bộ đề")));
+  assert.ok(statuses.some((s) => s.includes("Chưa thấy nút chuyển câu")));
+
+  // Kiểm tra findActionButtons nhận diện "Câu tiếp theo" và nút icon-only aria-label / chevron
+  const envBtn = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  const loadedBtn = loadModulesInEnv(envBtn.env, async () => null);
+  const textNext = el(envBtn.doc, "button", { text: "Câu tiếp theo", rect: { top: 600, left: 200, width: 140, height: 40 } });
+  envBtn.doc.body.appendChild(textNext);
+  assert.strictEqual(loadedBtn.AGENT._internalForTest.findActionButtons(envBtn.doc).nextBtn, textNext);
+
+  envBtn.doc.body.removeChild(textNext);
+  const backBtn = el(envBtn.doc, "button", { attrs: { "aria-label": "Câu trước" }, rect: { top: 600, left: 20, width: 44, height: 40 } }, [
+    el(envBtn.doc, "i", { className: "fa fa-chevron-left" })
+  ]);
+  const iconNext = el(envBtn.doc, "button", { attrs: { "aria-label": "Câu tiếp" }, rect: { top: 600, left: 300, width: 44, height: 40 } }, [
+    el(envBtn.doc, "i", { className: "fa fa-chevron-right" })
+  ]);
+  envBtn.doc.body.appendChild(backBtn);
+  envBtn.doc.body.appendChild(iconNext);
+  assert.strictEqual(loadedBtn.AGENT._internalForTest.findActionButtons(envBtn.doc).nextBtn, iconNext);
+});
+
 (async () => {
   let passed = 0;
   let failed = 0;
