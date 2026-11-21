@@ -735,12 +735,23 @@ class SolverController extends ChangeNotifier {
           ? 'none'
           : '${clickMap['ans'] ?? '?'}/${clickMap['attempts'] ?? 0}/ok=${clickMap['verified'] ?? false}/'
               '${clickMap['via'] ?? '-'}/${clickMap['targetTag'] ?? '-'}';
+      final advMap = diag['lastAdvance'] is Map ? Map<String, dynamic>.from(diag['lastAdvance'] as Map) : null;
+      final advLabel = advMap == null
+          ? '-'
+          : ((advMap['submitText'] ?? '').toString().isNotEmpty
+              ? advMap['submitText']
+              : ((advMap['nextText'] ?? '').toString().isNotEmpty ? advMap['nextText'] : '-'));
+      final advInfo = advMap == null
+          ? 'none'
+          : '${advMap['stage'] ?? '?'}/att=${advMap['attempts'] ?? 0}/ok=${advMap['changed'] ?? false}/'
+              '${advMap['targetTag'] ?? '-'}/$advLabel';
       return 'url=${diag['url']} | quiz=${diag['isQuiz']} | on=${diag['isExtensionEnabled']} | '
           'busy=${diag['isProcessing']} | sync=${diag['configSynced']} | '
           'vw=${dom['vw']}x${dom['vh']} | tbl=${dom['tables']} rad=${dom['radios']} inp=${dom['inputs']} ifr=${dom['iframes']} | '
           'ABCD=${letters['A'] ?? 0}/${letters['B'] ?? 0}/${letters['C'] ?? 0}/${letters['D'] ?? 0} | '
           'TF=${dom['tfTrue'] ?? 0}/${dom['tfFalse'] ?? 0} blk=${dom['multiBlocks'] ?? 0} | '
-          'solved=${diag['solvedSingleCount'] ?? 0}/${diag['solvedListCount'] ?? 0} | click=$clickInfo';
+          'solved=${diag['solvedSingleCount'] ?? 0}/${diag['solvedListCount'] ?? 0} | '
+          'click=$clickInfo | adv=$advInfo';
     } catch (e) {
       return 'Lỗi chẩn đoán (injected=$injected): $e';
     }

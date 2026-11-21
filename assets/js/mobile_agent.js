@@ -36,6 +36,7 @@
   let _cachedBodyTxtAt = 0;
   let _cachedBodyDoc = null;
   let lastClickInfo = null;
+  let lastAdvanceInfo = null;
 
   const managedTimers = new Set();
   const solvedListKeys = new Set();
@@ -45,6 +46,8 @@
   const attemptedSingleQuestions = new Set();
   const solvedSingleFingerprints = new Set();
   const solvedExplicitQCodes = new Set();
+  const submittedSingleFingerprints = new Set();
+  const explanationAdvanceAttempts = new Map();
   const clickedNavNums = new Set();
   const rejectedHistoryMap = new Map();
 
@@ -85,6 +88,7 @@
     isProcessing = false;
     isSelfAdvancing = false;
     lastClickInfo = null;
+    lastAdvanceInfo = null;
     clearProcessingWatchdog();
     clearAllManagedTimers();
     invalidateBodyTextCache();
@@ -207,10 +211,28 @@
     }
   }
 
+  function isInsideFixedElement(el) {
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      const tag = (cur.tagName || "").toLowerCase();
+      if (tag === "body" || tag === "html") break;
+      try {
+        const cs = typeof globalScope.getComputedStyle === "function" ? globalScope.getComputedStyle(cur) : cur.style;
+        const pos = String((cs && cs.position) || cur.style?.position || "").toLowerCase();
+        if (pos === "fixed") return true;
+      } catch (e) {}
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
   function scrollIfOffScreen(el) {
     if (!el) return;
     const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { top: 0, bottom: 0, height: 0 };
     const vh = globalScope.innerHeight || 800;
+    if (isInsideFixedElement(el) && r.height > 0 && r.top >= 0 && r.bottom <= vh) {
+      return;
+    }
     if (r.height === 0 || r.top < 60 || r.bottom > vh - 60) {
       scrollTargetIntoCenter(el);
     }
@@ -289,55 +311,311 @@
     }
   }
 
-  function isDisabledButton(el) {
+  const EXPLANATION_FEEDBACK_RE = /Đáp án đúng|Lời giải chi tiết|Lời giải\s*:|Giải thích\s*:|Đáp án của bạn|Chưa chính xác|Bạn đã trả lời (?:đúng|sai)/i;
+  const SUBMIT_MODAL_RE = /chắc chắn muốn nộp bài|xác nhận nộp bài|kết thúc bài làm|nộp bài thi/i;
+
+  function isElementConnected(el, doc = globalScope.document) {
+    if (!el) return false;
+    if (el.isConnected === false) return false;
+    if (el.isConnected === true) return true;
+    const root = doc?.documentElement || doc?.body;
+    return root && typeof root.contains === "function" ? root.contains(el) : true;
+  }
+
+  function normalizeActionLabel(el) {
+    if (!el) return "";
+    let s = String(el.textContent || el.innerText || "");
+    if (typeof s.normalize === "function") {
+      try {
+        s = s.normalize("NFC");
+      } catch (e) {}
+    }
+    return s
+      .replace(/\s+/g, " ")
+      .replace(/[←→➔▸▶›»<>]+/g, "")
+      .trim()
+      .toUpperCase();
+  }
+
+  function isDisabledButton(el, checkPointerEvents = false) {
     if (!el) return true;
     if (el.disabled === true || el.getAttribute?.("aria-disabled") === "true") return true;
+    const disabledAttr = el.getAttribute?.("disabled");
+    if (disabledAttr !== null && disabledAttr !== undefined && disabledAttr !== "false") return true;
     const cls = String(el.className || "");
-    return /\b(disabled|is-disabled|ant-btn-disabled)\b/i.test(cls);
+    if (/\b(disabled|is-disabled|btn-disabled|ant-btn-disabled|mat-button-disabled|pointer-events-none)\b/i.test(cls)) {
+      return true;
+    }
+    if (checkPointerEvents) {
+      try {
+        const cs = typeof globalScope.getComputedStyle === "function" ? globalScope.getComputedStyle(el) : el.style;
+        const pe = String((cs && cs.pointerEvents) || el.style?.pointerEvents || "").toLowerCase();
+        if (pe === "none") return true;
+      } catch (e) {}
+    }
+    return false;
+  }
+
+  function findClosestControl(el, doc = globalScope.document) {
+    const docBody = doc?.body || globalScope.document?.body;
+    const docHtml = doc?.documentElement || globalScope.document?.documentElement;
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      if (cur === docBody || cur === docHtml) break;
+      const tag = (cur.tagName || "").toLowerCase();
+      if (tag === "button" || tag === "a" || cur.getAttribute?.("role") === "button") {
+        return cur;
+      }
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  function isDisallowedActionContainer(el, doc = globalScope.document) {
+    if (!el || el.nodeType !== 1) return true;
+    const docBody = doc?.body || globalScope.document?.body;
+    const docHtml = doc?.documentElement || globalScope.document?.documentElement;
+    const elRect = el.getBoundingClientRect ? el.getBoundingClientRect() : { top: 0 };
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      if (cur === docBody || cur === docHtml) break;
+      const tag = (cur.tagName || "").toLowerCase();
+      if (tag === "header" || tag === "aside") return true;
+
+      const clsId = `${cur.className || ""} ${cur.id || ""}`.toLowerCase();
+      if (/(answer-sheet|question-palette|question-nav|quiz-sidebar|mobile-drawer|ant-drawer|drawer-content)/i.test(clsId)) {
+        return true;
+      }
+
+      const cr = cur.getBoundingClientRect ? cur.getBoundingClientRect() : { top: 999, height: 0 };
+      if (cr.height > 0 && cr.height <= 115 && cr.top >= -10 && cr.top <= 24 && elRect.top < 100) {
+        const curTxt = String(cur.textContent || "");
+        if (
+          tag === "nav" ||
+          /(header|topbar|top-bar|navbar|nav-bar|exam-header|quiz-header|app-header|app-bar|toolbar)/i.test(clsId) ||
+          /\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(curTxt)
+        ) {
+          return true;
+        }
+      }
+
+      if (
+        (cur.getAttribute?.("role") === "dialog" || /(modal|dialog|popup|ant-modal|swal)/i.test(clsId)) &&
+        SUBMIT_MODAL_RE.test(String(cur.textContent || ""))
+      ) {
+        return true;
+      }
+
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  function classifyActionLabel(t, isInteractive) {
+    if (!t || /NỘP BÀI|HOÀN THÀNH|KẾT THÚC|CHẤM ĐIỂM/i.test(t)) {
+      return { isSubmit: false, isNext: false };
+    }
+    const isSubmit =
+      t === "TRẢ LỜI" ||
+      t === "GỬI TRẢ LỜI" ||
+      t === "GỬI ĐÁP ÁN" ||
+      t === "KIỂM TRA" ||
+      t === "XÁC NHẬN";
+    const isShortNext = Boolean(isInteractive) && (t === "TIẾP" || t === "SAU" || t === "NEXT" || t === "CONTINUE");
+    const isNext =
+      t === "TIẾP TỤC" ||
+      t === "TIẾP THEO" ||
+      t === "CÂU TIẾP" ||
+      t === "CÂU TIẾP THEO" ||
+      t === "CÂU SAU" ||
+      t === "CÂU KẾ" ||
+      t === "CÂU KẾ TIẾP" ||
+      t === "CÂU TIẾP TỤC" ||
+      isShortNext;
+    return { isSubmit, isNext };
+  }
+
+  function hasActionButtonStyling(el) {
+    if (!el || el.nodeType !== 1) return false;
+    try {
+      const cs = typeof globalScope.getComputedStyle === "function" ? globalScope.getComputedStyle(el) : el.style;
+      if (cs && cs.cursor === "pointer") return true;
+    } catch (e) {}
+    if (el.style?.cursor === "pointer") return true;
+    if (typeof el.onclick === "function") return true;
+    const cls = String(el.className || "");
+    return /(btn|button|submit|answer|continue|next|action|pill|primary|confirm|cursor-pointer)/i.test(cls);
+  }
+
+  function resolvePrimaryActionTarget(leafEl, labelText, doc = globalScope.document) {
+    if (!leafEl) return null;
+    const ctrl = findClosestControl(leafEl, doc);
+    if (ctrl && !isDisabledButton(ctrl, true)) {
+      const ctrlLabel = normalizeActionLabel(ctrl);
+      if (
+        ctrlLabel.length > 0 &&
+        ctrlLabel.length <= 28 &&
+        !/NỘP BÀI|HOÀN THÀNH|KẾT THÚC|QUAY LẠI|TRƯỚC/i.test(ctrlLabel)
+      ) {
+        return ctrl;
+      }
+    }
+
+    const vw = globalScope.innerWidth || 1280;
+    const docBody = doc?.body || globalScope.document?.body;
+    const docHtml = doc?.documentElement || globalScope.document?.documentElement;
+    const chain = [];
+    let cur = leafEl;
+    for (let depth = 0; depth <= 3 && cur && cur.nodeType === 1; depth++) {
+      if (cur === docBody || cur === docHtml) break;
+      if (normalizeActionLabel(cur) !== labelText) break;
+      const cr = cur.getBoundingClientRect ? cur.getBoundingClientRect() : { width: 0, height: 0 };
+      if (cr.width > vw * 0.96 && cr.height > 110) break;
+      chain.push({ el: cur, rect: cr });
+      cur = cur.parentElement;
+    }
+
+    for (const item of chain) {
+      if (hasActionButtonStyling(item.el) && item.rect.width > 0 && item.rect.height > 0 && !isDisabledButton(item.el, true)) {
+        return item.el;
+      }
+    }
+
+    const leafRect = leafEl.getBoundingClientRect ? leafEl.getBoundingClientRect() : { width: 0, height: 0 };
+    if (leafRect.width > 0 && leafRect.height > 0 && !isDisabledButton(leafEl, true)) {
+      return leafEl;
+    }
+    for (const item of chain) {
+      if (item.rect.width > 0 && item.rect.height > 0 && !isDisabledButton(item.el, true)) {
+        return item.el;
+      }
+    }
+    return leafEl;
+  }
+
+  function getActionClickCandidates(primaryEl, leafEl = null, doc = globalScope.document) {
+    if (!primaryEl) return [];
+    const out = [];
+    const docBody = doc?.body || globalScope.document?.body;
+    const docHtml = doc?.documentElement || globalScope.document?.documentElement;
+    const addCandidate = (el) => {
+      if (!el || el === docBody || el === docHtml) return;
+      if (isDisabledButton(el, true) || EXT.isEffectivelyHidden?.(el)) return;
+      if (!out.includes(el)) out.push(el);
+    };
+
+    addCandidate(primaryEl);
+
+    if (leafEl && leafEl !== primaryEl) {
+      const lr = leafEl.getBoundingClientRect ? leafEl.getBoundingClientRect() : { width: 0, height: 0 };
+      if (lr.width > 0 && lr.height > 0) {
+        addCandidate(leafEl);
+      }
+    }
+
+    if (typeof doc?.elementFromPoint === "function" && typeof primaryEl.getBoundingClientRect === "function") {
+      try {
+        const pr = primaryEl.getBoundingClientRect();
+        if (pr && pr.width > 0 && pr.height > 0) {
+          const hit = doc.elementFromPoint(pr.left + pr.width / 2, pr.top + pr.height / 2);
+          if (
+            hit &&
+            hit !== docBody &&
+            hit !== docHtml &&
+            ((typeof primaryEl.contains === "function" && primaryEl.contains(hit)) ||
+              normalizeActionLabel(hit) === normalizeActionLabel(primaryEl))
+          ) {
+            addCandidate(hit);
+          }
+        }
+      } catch (e) {}
+    }
+
+    const parentEl = primaryEl.parentElement;
+    if (parentEl && parentEl !== docBody && parentEl !== docHtml) {
+      const pLabel = normalizeActionLabel(parentEl);
+      const myLabel = normalizeActionLabel(primaryEl);
+      if (pLabel && myLabel && pLabel === myLabel) {
+        const pr = parentEl.getBoundingClientRect ? parentEl.getBoundingClientRect() : { height: 0 };
+        if (pr.height > 0 && pr.height <= 96) {
+          addCandidate(parentEl);
+        }
+      }
+    }
+
+    return out.slice(0, 4);
   }
 
   function findActionButtons(doc = globalScope.document) {
     let submitBtn = null;
     let nextBtn = null;
-    const nodes = doc?.querySelectorAll?.("button, [role='button'], a, div, span") || [];
+    let submitLeaf = null;
+    let nextLeaf = null;
+    let submitText = "";
+    let nextText = "";
+
+    const bodyHasSubmitModal = SUBMIT_MODAL_RE.test(getVisibleBodyText(doc));
+    const nodes = doc?.querySelectorAll?.("button, [role='button'], a, div, span, p, b, strong") || [];
+    const rawMatches = [];
+
     for (const el of nodes) {
-      if ((el.children?.length || 0) > 2) continue;
-      const raw = (el.textContent || el.innerText || "").trim();
-      if (raw.length === 0 || raw.length > 24) continue;
-      const t = raw.replace(/[←→➔▸▶›»<>]+/g, "").trim().toUpperCase();
-      if (!t || t.length > 18) continue;
+      if ((el.children?.length || 0) > 4) continue;
+      const raw = String(el.textContent || el.innerText || "").trim();
+      if (raw.length === 0 || raw.length > 36) continue;
+      const t = normalizeActionLabel(el);
+      if (!t || t.length > 22) continue;
+      if (bodyHasSubmitModal && t === "XÁC NHẬN") continue;
 
-      const isSubmit = t === "TRẢ LỜI" || t === "KIỂM TRA" || t === "XÁC NHẬN";
-      const clickTarget = el.closest ? el.closest("button, [role='button'], a") || el : el;
-      const targetTag = (clickTarget.tagName || "").toLowerCase();
-      const isControlTarget = targetTag === "button" || targetTag === "a" || clickTarget.getAttribute?.("role") === "button";
-      const isShortNext = isControlTarget && (t === "TIẾP" || t === "SAU" || t === "NEXT");
-      const isNext =
-        t === "TIẾP TỤC" ||
-        t === "TIẾP THEO" ||
-        t === "CÂU TIẾP" ||
-        t === "CÂU TIẾP THEO" ||
-        t === "CÂU SAU" ||
-        t === "CÂU KẾ" ||
-        t === "CÂU KẾ TIẾP" ||
-        isShortNext;
-
+      const isInteractive =
+        Boolean(findClosestControl(el, doc)) ||
+        hasActionButtonStyling(el) ||
+        Boolean(el.parentElement && hasActionButtonStyling(el.parentElement) && normalizeActionLabel(el.parentElement) === t);
+      const { isSubmit, isNext } = classifyActionLabel(t, isInteractive);
       if (!isSubmit && !isNext) continue;
-      if (EXT.isEffectivelyHidden?.(el) || EXT.isInsideNavOrChrome(el)) continue;
-      if (isDisabledButton(el) || isDisabledButton(clickTarget)) continue;
-      const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
-      if (r.width === 0 || r.height === 0) continue;
 
-      if (isSubmit && !submitBtn) submitBtn = clickTarget;
-      if (isNext && !nextBtn) nextBtn = clickTarget;
+      rawMatches.push({ el, label: t, isSubmit, isNext });
+    }
+
+    // Leaf-first: loại bỏ node cha bọc ngoài nếu bên trong đã có node con khớp cùng loại nút
+    const leafMatches = rawMatches.filter((cand) => {
+      return !rawMatches.some(
+        (other) =>
+          other.el !== cand.el &&
+          ((cand.isSubmit && other.isSubmit) || (cand.isNext && other.isNext)) &&
+          typeof cand.el.contains === "function" &&
+          cand.el.contains(other.el)
+      );
+    });
+
+    for (const m of leafMatches) {
+      const primaryEl = resolvePrimaryActionTarget(m.el, m.label, doc);
+      if (!primaryEl) continue;
+      if (EXT.isEffectivelyHidden?.(m.el) || EXT.isEffectivelyHidden?.(primaryEl)) continue;
+      if (isDisallowedActionContainer(primaryEl, doc)) continue;
+      if (isDisabledButton(m.el, false) || isDisabledButton(primaryEl, true)) continue;
+
+      const pr = primaryEl.getBoundingClientRect ? primaryEl.getBoundingClientRect() : { width: 0, height: 0 };
+      const lr = m.el.getBoundingClientRect ? m.el.getBoundingClientRect() : { width: 0, height: 0 };
+      if ((pr.width === 0 || pr.height === 0) && (lr.width === 0 || lr.height === 0)) continue;
+
+      if (m.isSubmit && !submitBtn) {
+        submitBtn = primaryEl;
+        submitLeaf = m.el;
+        submitText = m.label;
+      }
+      if (m.isNext && !nextBtn) {
+        nextBtn = primaryEl;
+        nextLeaf = m.el;
+        nextText = m.label;
+      }
       if (submitBtn && nextBtn) break;
     }
 
     if (!nextBtn && doc?.querySelectorAll) {
       const iconControls = doc.querySelectorAll("button, [role='button'], a") || [];
       for (const el of iconControls) {
-        if (EXT.isEffectivelyHidden?.(el) || EXT.isInsideNavOrChrome(el)) continue;
-        if (isDisabledButton(el)) continue;
+        if (EXT.isEffectivelyHidden?.(el) || isDisallowedActionContainer(el, doc)) continue;
+        if (isDisabledButton(el, true)) continue;
         const raw = (el.textContent || el.innerText || "").trim();
         const aria = (el.getAttribute?.("aria-label") || "").trim();
         const title = (el.getAttribute?.("title") || "").trim();
@@ -359,12 +637,14 @@
           );
         if (hasNextLabel || hasNextClass || hasRightChevron) {
           nextBtn = el;
+          nextLeaf = el;
+          nextText = normalizeActionLabel(el) || aria.toUpperCase() || title.toUpperCase() || "ICON_NEXT";
           break;
         }
       }
     }
 
-    return { submitBtn, nextBtn };
+    return { submitBtn, nextBtn, submitLeaf, nextLeaf, submitText, nextText };
   }
 
   function findContinueButton(scopeDoc = document) {
@@ -1547,7 +1827,7 @@
   function advanceSingleStep(
     currentFingerprint,
     myEpoch = runEpoch,
-    { alreadyAutoAdvanced = false, qLabel = "" } = {}
+    { alreadyAutoAdvanced = false, qLabel = "", scopeDoc = null } = {}
   ) {
     attemptedSingleQuestions.add(currentFingerprint);
     isSelfAdvancing = true;
@@ -1555,11 +1835,53 @@
     scheduleManagedTimeout(async () => {
       try {
         if (!isRunAlive(myEpoch, true)) return;
-        const doc = globalScope.document;
-        if (!isQuizPage(doc, "ACTIVE")) return;
+        const primaryDoc = scopeDoc || globalScope.document;
+        const rootDoc = globalScope.document;
+        if (!isQuizPage(primaryDoc || rootDoc, "ACTIVE")) return;
         if (dismissSubmitModal()) return;
 
-        const preFp = alreadyAutoAdvanced ? "__AUTO_ADVANCED__" : computeLiveQuestionFingerprint(doc);
+        const liveFingerprintAcrossDocs = () => {
+          const fp1 = primaryDoc ? computeLiveQuestionFingerprint(primaryDoc) : "";
+          if (fp1) return fp1;
+          if (rootDoc && rootDoc !== primaryDoc) {
+            return computeLiveQuestionFingerprint(rootDoc);
+          }
+          return "";
+        };
+
+        const findButtonsAcrossDocs = () => {
+          if (primaryDoc) {
+            const r1 = findActionButtons(primaryDoc);
+            if (r1.submitBtn || r1.nextBtn) {
+              return { ...r1, activeDoc: primaryDoc };
+            }
+          }
+          if (rootDoc && rootDoc !== primaryDoc) {
+            const r2 = findActionButtons(rootDoc);
+            if (r2.submitBtn || r2.nextBtn) {
+              return { ...r2, activeDoc: rootDoc };
+            }
+          }
+          return {
+            submitBtn: null,
+            nextBtn: null,
+            submitLeaf: null,
+            nextLeaf: null,
+            submitText: "",
+            nextText: "",
+            activeDoc: primaryDoc || rootDoc
+          };
+        };
+
+        const getCombinedVisibleText = (d = primaryDoc || rootDoc) => {
+          const t1 = d ? getVisibleBodyText(d) : "";
+          if (rootDoc && d !== rootDoc) {
+            return `${t1}\n${getVisibleBodyText(rootDoc)}`;
+          }
+          return t1;
+        };
+
+        const preFp = alreadyAutoAdvanced ? "__AUTO_ADVANCED__" : liveFingerprintAcrossDocs();
         if (alreadyAutoAdvanced || (preFp && preFp !== currentFingerprint)) {
           await waitMs(350);
           if (!isRunAlive(myEpoch, true)) return;
@@ -1574,71 +1896,273 @@
         invalidateBodyTextCache();
         if (dismissSubmitModal()) return;
 
-        const { submitBtn, nextBtn } = findActionButtons(doc);
         let changed = false;
-
-        const waitForFingerprintChange = async (maxPolls, intervalMs, checkNextIfAppears = false) => {
-          let clickedAppearNext = false;
-          for (let i = 0; i < maxPolls; i++) {
-            await waitMs(intervalMs);
-            if (!isRunAlive(myEpoch, true)) return false;
+        let actions = findButtonsAcrossDocs();
+        if (!actions.submitBtn && !actions.nextBtn) {
+          for (let w = 0; w < 4; w++) {
+            await waitMs(200);
+            if (!isRunAlive(myEpoch, true)) return;
             invalidateBodyTextCache();
-            if (dismissSubmitModal()) return false;
-
-            const liveFp = computeLiveQuestionFingerprint(doc);
-            if (liveFp && liveFp !== currentFingerprint) {
-              return true;
+            if (dismissSubmitModal()) return;
+            const liveCheckFp = liveFingerprintAcrossDocs();
+            if (liveCheckFp && liveCheckFp !== currentFingerprint) {
+              changed = true;
+              break;
             }
-            if (checkNextIfAppears && !clickedAppearNext) {
-              const { nextBtn: appearedNext } = findActionButtons(doc);
-              if (appearedNext) {
+            actions = findButtonsAcrossDocs();
+            if (actions.submitBtn || actions.nextBtn) break;
+          }
+        }
+
+        const { submitBtn, nextBtn, submitLeaf, nextLeaf, activeDoc } = actions;
+        const initBodyTxt = getCombinedVisibleText(activeDoc);
+        const initQCode = (initBodyTxt.match(/#\d{5,}/) || [])[0] || "";
+
+        const clickActionWithSafeFallback = async (btnEl, leafEl, targetDoc, kind) => {
+          if (!btnEl) return { triggered: false, effect: "", attempts: 0, lastTarget: null };
+          scrollIfOffScreen(btnEl);
+          const candidates = getActionClickCandidates(btnEl, leafEl, targetDoc);
+          const preBtnText = normalizeActionLabel(btnEl);
+          const preHasExpl = EXPLANATION_FEEDBACK_RE.test(getCombinedVisibleText(targetDoc));
+
+          const detectEffect = () => {
+            invalidateBodyTextCache();
+            const liveFp = liveFingerprintAcrossDocs();
+            const curBody = getCombinedVisibleText(targetDoc);
+            const curQCode = (curBody.match(/#\d{5,}/) || [])[0] || "";
+            const curHasExpl = EXPLANATION_FEEDBACK_RE.test(curBody);
+
+            if (initQCode && curQCode && curQCode !== initQCode) {
+              return "fp_changed";
+            }
+            if (kind === "submit") {
+              const appeared = findButtonsAcrossDocs();
+              if (
+                (!appeared.submitBtn && appeared.nextBtn) ||
+                (!preHasExpl && curHasExpl && appeared.nextBtn)
+              ) {
+                return "next_or_expl";
+              }
+            }
+            if (liveFp && liveFp !== currentFingerprint) {
+              return "fp_changed";
+            }
+            if (
+              !isElementConnected(btnEl, targetDoc) ||
+              EXT.isEffectivelyHidden?.(btnEl) ||
+              isDisabledButton(btnEl, true)
+            ) {
+              return "btn_consumed";
+            }
+            if (normalizeActionLabel(btnEl) !== preBtnText) {
+              return "btn_morphed";
+            }
+            return "";
+          };
+
+          let attempts = 0;
+          let lastTarget = btnEl;
+          let effect = "";
+
+          for (const cand of candidates) {
+            if (!isRunAlive(myEpoch, true)) {
+              return { triggered: false, effect: "aborted", attempts, lastTarget };
+            }
+            dispatchClick(cand);
+            attempts += 1;
+            lastTarget = cand;
+
+            for (let p = 0; p < 2; p++) {
+              await waitMs(175);
+              if (!isRunAlive(myEpoch, true)) {
+                return { triggered: false, effect: "aborted", attempts, lastTarget };
+              }
+              if (dismissSubmitModal()) {
+                return { triggered: false, effect: "modal", attempts, lastTarget };
+              }
+              effect = detectEffect();
+              if (effect) break;
+            }
+            if (effect) break;
+          }
+
+          return { triggered: Boolean(effect), effect, attempts, lastTarget };
+        };
+
+        if (!changed && submitBtn) {
+          submittedSingleFingerprints.add(currentFingerprint);
+          const submitRes = await clickActionWithSafeFallback(submitBtn, submitLeaf, activeDoc, "submit");
+          if (!isRunAlive(myEpoch, true)) return;
+
+          let clickedAppearNext = false;
+          let appearedNextText = "";
+          let totalAttempts = submitRes.attempts;
+          let finalTarget = submitRes.lastTarget || submitBtn;
+
+          if (submitRes.effect === "fp_changed") {
+            changed = true;
+          } else {
+            for (let i = 0; i < 10; i++) {
+              if (i > 0 || submitRes.attempts === 0) {
+                await waitMs(220);
+              }
+              if (!isRunAlive(myEpoch, true)) return;
+              invalidateBodyTextCache();
+              if (dismissSubmitModal()) return;
+
+              const curBody = getCombinedVisibleText(activeDoc);
+              const curQCode = (curBody.match(/#\d{5,}/) || [])[0] || "";
+              const curHasExpl = EXPLANATION_FEEDBACK_RE.test(curBody);
+              const liveFp = liveFingerprintAcrossDocs();
+              const appeared = findButtonsAcrossDocs();
+
+              const qCodeChanged = Boolean(initQCode && curQCode && curQCode !== initQCode);
+              const isExplanationNextReady =
+                !qCodeChanged &&
+                !clickedAppearNext &&
+                Boolean(appeared.nextBtn) &&
+                (!appeared.submitBtn || curHasExpl || !liveFp || liveFp === currentFingerprint);
+
+              if (qCodeChanged || (liveFp && liveFp !== currentFingerprint && !isExplanationNextReady)) {
+                changed = true;
+                break;
+              }
+
+              if (!clickedAppearNext && appeared.nextBtn) {
                 clickedAppearNext = true;
-                dispatchClick(appearedNext);
-                for (let j = 0; j < 7; j++) {
+                appearedNextText = appeared.nextText || "";
+                const nextRes = await clickActionWithSafeFallback(
+                  appeared.nextBtn,
+                  appeared.nextLeaf,
+                  appeared.activeDoc,
+                  "next"
+                );
+                if (!isRunAlive(myEpoch, true)) return;
+                totalAttempts += nextRes.attempts;
+                if (nextRes.lastTarget) finalTarget = nextRes.lastTarget;
+                if (nextRes.effect === "fp_changed") {
+                  changed = true;
+                  break;
+                }
+                for (let j = 0; j < 9; j++) {
                   await waitMs(220);
-                  if (!isRunAlive(myEpoch, true)) return false;
+                  if (!isRunAlive(myEpoch, true)) return;
                   invalidateBodyTextCache();
-                  if (dismissSubmitModal()) return false;
-                  const afterNextFp = computeLiveQuestionFingerprint(doc);
+                  if (dismissSubmitModal()) return;
+                  const afterNextFp = liveFingerprintAcrossDocs();
                   if (afterNextFp && afterNextFp !== currentFingerprint) {
-                    return true;
+                    changed = true;
+                    break;
                   }
                 }
-                return false;
+                break;
               }
             }
           }
-          return false;
-        };
 
-        if (submitBtn) {
-          dispatchClick(submitBtn);
-          changed = await waitForFingerprintChange(6, 220, true);
-        } else if (nextBtn) {
-          dispatchClick(nextBtn);
-          changed = await waitForFingerprintChange(8, 200, false);
+          lastAdvanceInfo = {
+            stage: clickedAppearNext ? "submit->next" : "submit",
+            foundSubmit: true,
+            foundNext: Boolean(clickedAppearNext || nextBtn),
+            submitText: actions.submitText || "",
+            nextText: appearedNextText || actions.nextText || "",
+            attempts: totalAttempts,
+            changed,
+            targetTag: finalTarget?.tagName || "",
+            targetClass: String(finalTarget?.className || "").slice(0, 50)
+          };
+        } else if (!changed && nextBtn) {
+          const nextRes = await clickActionWithSafeFallback(nextBtn, nextLeaf, activeDoc, "next");
+          if (!isRunAlive(myEpoch, true)) return;
+          let finalTarget = nextRes.lastTarget || nextBtn;
+
+          if (nextRes.effect === "fp_changed") {
+            changed = true;
+          } else {
+            for (let i = 0; i < 9; i++) {
+              await waitMs(200);
+              if (!isRunAlive(myEpoch, true)) return;
+              invalidateBodyTextCache();
+              if (dismissSubmitModal()) return;
+              const liveFp = liveFingerprintAcrossDocs();
+              if (liveFp && liveFp !== currentFingerprint) {
+                changed = true;
+                break;
+              }
+            }
+          }
+
+          lastAdvanceInfo = {
+            stage: "next",
+            foundSubmit: false,
+            foundNext: true,
+            submitText: "",
+            nextText: actions.nextText || "",
+            attempts: nextRes.attempts,
+            changed,
+            targetTag: finalTarget?.tagName || "",
+            targetClass: String(finalTarget?.className || "").slice(0, 50)
+          };
         }
 
         if (!changed) {
           if (!isRunAlive(myEpoch, true)) return;
           invalidateBodyTextCache();
-          const liveNowFp = computeLiveQuestionFingerprint(doc);
-          const nowTxt = getVisibleBodyText(doc);
-          const isExplanation = /Đáp án đúng|Lời giải chi tiết/i.test(nowTxt);
+          const liveNowFp = liveFingerprintAcrossDocs();
+          const nowTxt = getCombinedVisibleText(activeDoc);
+          const isExplanation = EXPLANATION_FEEDBACK_RE.test(nowTxt);
 
-          if (!isExplanation && (!liveNowFp || liveNowFp === currentFingerprint) && isQuizPage(doc, liveNowFp ? "ACTIVE" : null)) {
+          if (!submitBtn && !nextBtn) {
+            lastAdvanceInfo = {
+              stage: "none",
+              foundSubmit: false,
+              foundNext: false,
+              submitText: "",
+              nextText: "",
+              attempts: 0,
+              changed: false,
+              targetTag: "",
+              targetClass: ""
+            };
+          }
+
+          if (!isExplanation && (!liveNowFp || liveNowFp === currentFingerprint) && isQuizPage(activeDoc, liveNowFp ? "ACTIVE" : null)) {
             const { map, activeNum } = getNavState();
             const maxQ = map.size > 0 ? Math.max(...map.keys()) : 0;
             const nextNum = activeNum !== null ? activeNum + 1 : null;
 
             if (nextNum !== null && maxQ > 0 && nextNum <= maxQ && map.has(nextNum)) {
-              dispatchClick(map.get(nextNum));
+              const navTarget = map.get(nextNum);
+              dispatchClick(navTarget);
+              lastAdvanceInfo = {
+                stage: "nav",
+                foundSubmit: Boolean(submitBtn),
+                foundNext: Boolean(nextBtn),
+                submitText: actions.submitText || "",
+                nextText: String(nextNum),
+                attempts: 1,
+                changed: true,
+                targetTag: navTarget?.tagName || "",
+                targetClass: String(navTarget?.className || "").slice(0, 50)
+              };
               await waitMs(450);
             } else if (activeNum === null && maxQ > 0) {
               const fallbackNum = attemptedSingleQuestions.size + 1;
               if (fallbackNum <= maxQ && map.has(fallbackNum) && !clickedNavNums.has(fallbackNum)) {
                 clickedNavNums.add(fallbackNum);
-                dispatchClick(map.get(fallbackNum));
+                const navTarget = map.get(fallbackNum);
+                dispatchClick(navTarget);
+                lastAdvanceInfo = {
+                  stage: "nav",
+                  foundSubmit: Boolean(submitBtn),
+                  foundNext: Boolean(nextBtn),
+                  submitText: actions.submitText || "",
+                  nextText: String(fallbackNum),
+                  attempts: 1,
+                  changed: true,
+                  targetTag: navTarget?.tagName || "",
+                  targetClass: String(navTarget?.className || "").slice(0, 50)
+                };
                 await waitMs(450);
               } else if (attemptedSingleQuestions.size >= maxQ) {
                 syncStatus("✅ Đã hoàn thành toàn bộ đề! Sẵn sàng xuất file đáp án.");
@@ -1702,21 +2226,47 @@
       }
     }
 
-    if (autoAdvanceEnabled && /Đáp án đúng|Lời giải chi tiết/i.test(bodyTxt)) {
-      const nextBtn = findContinueButton(scopeDoc);
-      if (nextBtn) {
-        isProcessing = true;
-        isSelfAdvancing = true;
-        syncStatus("⏭️ Đang chuyển qua bước giải thích sang câu tiếp...");
-        dispatchClick(nextBtn);
-        scheduleManagedTimeout(() => {
-          if (myEpoch === runEpoch) {
-            isSelfAdvancing = false;
-            isProcessing = false;
-          }
-          processScreen(false);
-        }, 550, myEpoch, true);
-        return { reason: "step_explanation_advanced" };
+    if (autoAdvanceEnabled && EXPLANATION_FEEDBACK_RE.test(bodyTxt)) {
+      let explActions = findActionButtons(scopeDoc);
+      if (!explActions.nextBtn && scopeDoc !== globalScope.document) {
+        explActions = findActionButtons(globalScope.document);
+      }
+      const explNextBtn = explActions.nextBtn;
+      if (explNextBtn) {
+        const explKey = `EXPL_${stripVolatileUiText(bodyTxt).slice(0, 80)}`;
+        const tries = explanationAdvanceAttempts.get(explKey) || 0;
+        if (tries < 2) {
+          explanationAdvanceAttempts.set(explKey, tries + 1);
+          isProcessing = true;
+          isSelfAdvancing = true;
+          syncStatus("⏭️ Đang chuyển qua bước giải thích sang câu tiếp...");
+          const explCands = getActionClickCandidates(
+            explNextBtn,
+            explActions.nextLeaf,
+            explNextBtn.ownerDocument || scopeDoc
+          );
+          const clickEl = explCands[tries] || explNextBtn;
+          dispatchClick(clickEl);
+          lastAdvanceInfo = {
+            stage: "explanation_next",
+            foundSubmit: Boolean(explActions.submitBtn),
+            foundNext: true,
+            submitText: "",
+            nextText: explActions.nextText || "",
+            attempts: tries + 1,
+            changed: false,
+            targetTag: clickEl?.tagName || "",
+            targetClass: String(clickEl?.className || "").slice(0, 50)
+          };
+          scheduleManagedTimeout(() => {
+            if (myEpoch === runEpoch) {
+              isSelfAdvancing = false;
+              isProcessing = false;
+            }
+            processScreen(false);
+          }, 550, myEpoch, true);
+          return { reason: "step_explanation_advanced" };
+        }
       }
     }
 
@@ -1751,6 +2301,46 @@
         solvedSingleFingerprints.has(curSig) ||
         (hasExplicitCode && solvedExplicitQCodes.has(qCode)))
     ) {
+      if (autoAdvanceEnabled && submittedSingleFingerprints.has(curSig)) {
+        let lateActions = findActionButtons(scopeDoc);
+        if (!lateActions.nextBtn && scopeDoc !== globalScope.document) {
+          lateActions = findActionButtons(globalScope.document);
+        }
+        const lateNextBtn = lateActions.nextBtn;
+        const lateTries = explanationAdvanceAttempts.get(curSig) || 0;
+        if (lateNextBtn && lateTries < 2) {
+          explanationAdvanceAttempts.set(curSig, lateTries + 1);
+          isProcessing = true;
+          isSelfAdvancing = true;
+          syncStatus("⏭️ Thấy nút Tiếp tục xuất hiện trễ — đang chuyển câu...");
+          const lateCands = getActionClickCandidates(
+            lateNextBtn,
+            lateActions.nextLeaf,
+            lateNextBtn.ownerDocument || scopeDoc
+          );
+          const clickEl = lateCands[lateTries] || lateNextBtn;
+          dispatchClick(clickEl);
+          lastAdvanceInfo = {
+            stage: "late_next",
+            foundSubmit: Boolean(lateActions.submitBtn),
+            foundNext: true,
+            submitText: "",
+            nextText: lateActions.nextText || "",
+            attempts: lateTries + 1,
+            changed: false,
+            targetTag: clickEl?.tagName || "",
+            targetClass: String(clickEl?.className || "").slice(0, 50)
+          };
+          scheduleManagedTimeout(() => {
+            if (myEpoch === runEpoch) {
+              isSelfAdvancing = false;
+              isProcessing = false;
+            }
+            processScreen(false);
+          }, 550, myEpoch, true);
+          return { reason: "late_continue_advanced", qCode, type };
+        }
+      }
       return { reason: "already_solved_sig", qCode, type };
     }
 
@@ -1769,7 +2359,7 @@
       syncStatus(`Bỏ qua ${qCode} (Đã làm)`, `${qCode}: ${cleanExportAns}`);
       if (autoAdvanceEnabled) {
         isProcessing = true;
-        advanceSingleStep(curSig, myEpoch, { qLabel: qCode });
+        advanceSingleStep(curSig, myEpoch, { qLabel: qCode, scopeDoc });
       }
       return { reason: "skipped_already_answered", qCode, type };
     }
@@ -1893,7 +2483,8 @@
             if (autoAdvanceEnabled) {
               advanceSingleStep(curSig, myEpoch, {
                 alreadyAutoAdvanced: Boolean(applyOutcome?.autoAdvanced),
-                qLabel: qCode
+                qLabel: qCode,
+                scopeDoc
               });
             } else {
               isProcessing = false;
@@ -1950,6 +2541,8 @@
     attemptedSingleQuestions.clear();
     solvedSingleFingerprints.clear();
     solvedExplicitQCodes.clear();
+    submittedSingleFingerprints.clear();
+    explanationAdvanceAttempts.clear();
     clickedNavNums.clear();
     if (isExtensionEnabled) {
       scheduleManagedTimeout(() => {
@@ -1969,6 +2562,8 @@
         solvedSignature = "";
         solvedSingleFingerprints.clear();
         solvedExplicitQCodes.clear();
+        submittedSingleFingerprints.clear();
+        explanationAdvanceAttempts.clear();
         isProcessing = false;
         isSelfAdvancing = false;
         processScreen(false);
@@ -1989,6 +2584,8 @@
     skippedFailedListKeys.clear();
     solvedSingleFingerprints.clear();
     solvedExplicitQCodes.clear();
+    submittedSingleFingerprints.clear();
+    explanationAdvanceAttempts.clear();
     solvedBlockEls = new WeakSet();
     return processScreen(true);
   }
@@ -2032,6 +2629,7 @@
       isSelfAdvancing,
       runEpoch,
       lastClick: lastClickInfo,
+      lastAdvance: lastAdvanceInfo,
       isExtensionEnabled,
       configSynced,
       autoAdvanceEnabled,
@@ -2047,6 +2645,7 @@
       applyAnswerToDOM,
       clickMCQ,
       getMcqClickCandidates,
+      getActionClickCandidates,
       findActionButtons,
       advanceSingleStep,
       prepareVisualAttachments,
@@ -2063,6 +2662,7 @@
         cancelActiveWork();
         solvedSignature = "";
         lastClickInfo = null;
+        lastAdvanceInfo = null;
         configSynced = false;
         lastRouteKey = normalizeRouteKey();
         isExtensionEnabled = true;
@@ -2076,6 +2676,8 @@
         attemptedSingleQuestions.clear();
         solvedSingleFingerprints.clear();
         solvedExplicitQCodes.clear();
+        submittedSingleFingerprints.clear();
+        explanationAdvanceAttempts.clear();
         clickedNavNums.clear();
         rejectedHistoryMap.clear();
       }

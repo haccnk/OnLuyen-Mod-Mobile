@@ -1854,6 +1854,427 @@ test("37. Circuit breaker chống vòng lặp khi click thất bại toàn bộ 
   assert.strictEqual(solveCalls, 2);
 });
 
+test("38. Nút 'TRẢ LỜI' -> 'TIẾP TỤC' lồng trong div + bottom <nav fixed>: chọn đúng nút trong, không nhảy cóc", async () => {
+  const { doc, env } = createTestEnvironment({
+    innerWidth: 390,
+    innerHeight: 844,
+    url: "https://app.onluyen.vn/practice/step-mobile-1"
+  });
+  const origSetTimeout = global.setTimeout;
+  const solvedQuestions = [];
+  let q1AdvSnapshot = null;
+  let outerFooterClicks = 0;
+  let q1SubmitClicks = 0;
+  let q1ContinueClicks = 0;
+  let q2SubmitClicks = 0;
+
+  const loaded = loadModulesInEnv(env, async (handler, args) => {
+    if (handler === "solveQuiz") {
+      solvedQuestions.push(args.rawScreenText);
+      if (args.rawScreenText.includes("Tìm nghiệm x.")) {
+        q1AdvSnapshot = loaded.AGENT.getDiagnostics().lastAdvance;
+      }
+      return { success: true, result: { normalizedAns: "C", confidence: 98 } };
+    }
+    return null;
+  });
+  loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+  loaded.AGENT._internalForTest.resetState();
+
+  const buildBottomNav = (innerNode) =>
+    el(
+      doc,
+      "nav",
+      {
+        className: "bottom-nav",
+        cs: { position: "fixed" },
+        style: { position: "fixed" },
+        rect: { top: 770, left: 0, width: 390, height: 64 }
+      },
+      [innerNode]
+    );
+
+  // Kiểm tra findActionButtons chọn .btn-submit bên trong thay vì .footer-wrap bọc ngoài
+  const spanLabel1 = el(doc, "span", {
+    text: "  Trả \n lời  ",
+    rect: { top: 790, left: 150, width: 90, height: 22 }
+  });
+  const btnSubmit1 = el(
+    doc,
+    "div",
+    {
+      className: "btn-submit rounded-full",
+      cs: { cursor: "pointer" },
+      rect: { top: 780, left: 32, width: 326, height: 44 }
+    },
+    [spanLabel1]
+  );
+  const footerWrap1 = el(
+    doc,
+    "div",
+    { className: "footer-wrap", rect: { top: 774, left: 12, width: 366, height: 56 } },
+    [btnSubmit1]
+  );
+  footerWrap1.addEventListener("click", () => {
+    outerFooterClicks += 1;
+  });
+
+  const renderQ2 = () => {
+    doc.body.childNodes = [];
+    const btns2 = ["A", "B", "C", "D"].map((L, i) => {
+      const b = el(doc, "div", {
+        className: "answer-card",
+        cs: { cursor: "pointer" },
+        rect: { top: 180 + i * 56, left: 16, width: 358, height: 46 }
+      }, [
+        el(doc, "span", { text: L, rect: { top: 190 + i * 56, left: 28, width: 22, height: 22 } }),
+        el(doc, "span", { text: `C2-${L}`, rect: { top: 190 + i * 56, left: 60, width: 200, height: 22 } })
+      ]);
+      b.addEventListener("click", () => {
+        btns2.forEach((x) => x.setAttribute("class", "answer-card"));
+        b.setAttribute("class", "answer-card selected");
+      });
+      return b;
+    });
+    const submit2 = el(
+      doc,
+      "div",
+      { className: "btn-submit", cs: { cursor: "pointer" }, rect: { top: 780, left: 32, width: 326, height: 44 } },
+      [el(doc, "span", { text: "TRẢ LỜI", rect: { top: 790, left: 150, width: 90, height: 22 } })]
+    );
+    submit2.addEventListener("click", () => {
+      q2SubmitClicks += 1;
+      loaded.AGENT.updateConfig({ autoAdvanceEnabled: false });
+    });
+    doc.body.appendChild(
+      el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 420 } }, [
+        el(doc, "p", { text: "Câu 2: Tìm nghiệm x." }),
+        ...btns2
+      ])
+    );
+    doc.body.appendChild(buildBottomNav(submit2));
+  };
+
+  btnSubmit1.addEventListener("click", () => {
+    q1SubmitClicks += 1;
+    // Giả lập OnLuyen giữ nguyên khung câu 1 nhưng hiện lời giải + nút TIẾP TỤC trong bottom-nav
+    const navChildren = doc.body.childNodes.slice(0, 1);
+    doc.body.childNodes = [];
+    navChildren[0].appendChild(el(doc, "p", { text: "Đáp án đúng: C" }));
+    doc.body.appendChild(navChildren[0]);
+
+    const contSpan = el(doc, "span", { text: "TIẾP TỤC", rect: { top: 790, left: 150, width: 90, height: 22 } });
+    const contDiv = el(
+      doc,
+      "div",
+      { className: "btn-continue", cs: { cursor: "pointer" }, rect: { top: 780, left: 32, width: 326, height: 44 } },
+      [contSpan]
+    );
+    contDiv.addEventListener("click", () => {
+      q1ContinueClicks += 1;
+      renderQ2();
+    });
+    doc.body.appendChild(buildBottomNav(contDiv));
+  });
+
+  const q1Btns = ["A", "B", "C", "D"].map((L, i) => {
+    const b = el(doc, "div", {
+      className: "answer-card",
+      cs: { cursor: "pointer" },
+      rect: { top: 180 + i * 56, left: 16, width: 358, height: 46 }
+    }, [
+      el(doc, "span", { text: L, rect: { top: 190 + i * 56, left: 28, width: 22, height: 22 } }),
+      el(doc, "span", { text: `C1-${L}`, rect: { top: 190 + i * 56, left: 60, width: 200, height: 22 } })
+    ]);
+    b.addEventListener("click", () => {
+      q1Btns.forEach((x) => x.setAttribute("class", "answer-card"));
+      b.setAttribute("class", "answer-card selected");
+    });
+    return b;
+  });
+
+  doc.body.appendChild(
+    el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 420 } }, [
+      el(doc, "p", { text: "Câu 1: Cho tập hợp A." }),
+      ...q1Btns
+    ])
+  );
+  doc.body.appendChild(buildBottomNav(footerWrap1));
+
+  const found = loaded.AGENT._internalForTest.findActionButtons(doc);
+  assert.strictEqual(found.submitBtn, btnSubmit1, "Phải chọn .btn-submit bên trong chứ không phải .footer-wrap");
+
+  loaded.AGENT._internalForTest.processScreen(false);
+  for (let i = 0; i < 120; i++) {
+    await new Promise((r) => origSetTimeout(r, 15));
+    if (solvedQuestions.length >= 2 && q2SubmitClicks >= 1) break;
+  }
+  loaded.AGENT.cleanup();
+
+  assert.strictEqual(btnSubmit1.scrollIntoViewCalls.length, 0, "Nút trong bottom-nav fixed không được cuộn giật trang");
+  assert.strictEqual(q1SubmitClicks, 1, "Chỉ click TRẢ LỜI Câu 1 đúng 1 lần");
+  assert.strictEqual(outerFooterClicks, 1, "Click nổi bọt đúng 1 lần từ .btn-submit");
+  assert.strictEqual(q1ContinueClicks, 1, "Chỉ click TIẾP TỤC Câu 1 đúng 1 lần");
+  assert.strictEqual(solvedQuestions.length, 2, "Phải giải cả Câu 1 và Câu 2");
+  assert.strictEqual(q2SubmitClicks, 1, "Câu 2 chỉ giải xong mới click TRẢ LỜI");
+  assert.strictEqual(q1AdvSnapshot?.stage, "submit->next");
+  assert.strictEqual(q1AdvSnapshot?.changed, true);
+});
+
+test("39. Chờ nút 'TRẢ LỜI' mở khóa disabled & safe fallback xuống <span> con khi pill ngoài không nghe click", async () => {
+  // 39a: Nút TRẢ LỜI ban đầu disabled, 900ms (ảo) sau khi chọn đáp án mới mở khóa
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const origSetTimeout = global.setTimeout;
+    let submitClicks = 0;
+    let solvedCount = 0;
+
+    const loaded = loadModulesInEnv(env, async (handler) => {
+      if (handler === "solveQuiz") {
+        solvedCount += 1;
+        return { success: true, result: { normalizedAns: "A", confidence: 95 } };
+      }
+      return null;
+    });
+    loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+    loaded.AGENT._internalForTest.resetState();
+
+    const submitDiv = el(doc, "div", {
+      className: "btn-submit disabled",
+      cs: { cursor: "pointer" },
+      text: "TRẢ LỜI",
+      rect: { top: 760, left: 32, width: 326, height: 44 }
+    });
+    submitDiv.addEventListener("click", () => {
+      submitClicks += 1;
+      doc.body.childNodes = [];
+      doc.body.appendChild(
+        el(doc, "div", { rect: { top: 80, left: 10, width: 360, height: 350 } }, [
+          el(doc, "p", { text: "Câu 2: Đã chuyển câu." }),
+          ...["A", "B", "C", "D"].map((L, i) =>
+            el(doc, "button", { text: `${L}. X${L}`, rect: { top: 150 + i * 48, left: 12, width: 340, height: 40 } })
+          )
+        ])
+      );
+      loaded.AGENT.updateConfig({ autoAdvanceEnabled: false });
+    });
+
+    const opts = ["A", "B", "C", "D"].map((L, i) => {
+      const b = el(doc, "button", {
+        text: `${L}. Đáp án ${L}`,
+        rect: { top: 150 + i * 48, left: 12, width: 340, height: 40 }
+      });
+      b.addEventListener("click", () => {
+        b.setAttribute("class", "selected");
+        loaded.sandbox.setTimeout(() => {
+          submitDiv.setAttribute("class", "btn-submit");
+        }, 900);
+      });
+      return b;
+    });
+
+    doc.body.appendChild(
+      el(doc, "div", { rect: { top: 80, left: 10, width: 360, height: 400 } }, [
+        el(doc, "p", { text: "Câu 1: Mở khóa trễ." }),
+        ...opts,
+        submitDiv
+      ])
+    );
+
+    loaded.AGENT._internalForTest.processScreen(false);
+    for (let i = 0; i < 120; i++) {
+      await new Promise((r) => origSetTimeout(r, 15));
+      if (submitClicks >= 1 && !loaded.AGENT.getDiagnostics().isSelfAdvancing) break;
+    }
+    const adv39a = loaded.AGENT.getDiagnostics().lastAdvance;
+    loaded.AGENT.cleanup();
+
+    assert.strictEqual(solvedCount, 1);
+    assert.strictEqual(submitClicks, 1, "Phải chờ nút TRẢ LỜI hết disabled rồi bấm đúng 1 lần");
+    assert.strictEqual(adv39a?.changed, true);
+  }
+
+  // 39b: Listener chỉ gắn vào <span> con bên trong .btn-pill (div ngoài không có listener)
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const origSetTimeout = global.setTimeout;
+    let pillClicks = 0;
+    let pillClicksBeforeSpan = 0;
+    let spanClicks = 0;
+
+    const loaded = loadModulesInEnv(env, async (handler) => {
+      if (handler === "solveQuiz") {
+        return { success: true, result: { normalizedAns: "B", confidence: 95 } };
+      }
+      return null;
+    });
+    loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+    loaded.AGENT._internalForTest.resetState();
+
+    const innerSpan = el(doc, "span", {
+      text: "TRẢ LỜI",
+      rect: { top: 770, left: 140, width: 100, height: 24 }
+    });
+    const outerPill = el(
+      doc,
+      "div",
+      {
+        className: "btn-pill",
+        cs: { cursor: "pointer" },
+        rect: { top: 760, left: 32, width: 326, height: 44 }
+      },
+      [innerSpan]
+    );
+    outerPill.addEventListener("click", () => {
+      pillClicks += 1; // Chỉ ghi nhận click trực tiếp và nổi bọt, cố tình không chuyển trang
+    });
+    innerSpan.addEventListener("click", () => {
+      pillClicksBeforeSpan = pillClicks;
+      spanClicks += 1;
+      doc.body.childNodes = [];
+      doc.body.appendChild(
+        el(doc, "div", { rect: { top: 80, left: 10, width: 360, height: 350 } }, [
+          el(doc, "p", { text: "Câu 2: Đã qua câu mới nhờ bấm <span>." }),
+          ...["A", "B", "C", "D"].map((L, i) =>
+            el(doc, "button", { text: `${L}. Y${L}`, rect: { top: 150 + i * 48, left: 12, width: 340, height: 40 } })
+          )
+        ])
+      );
+      loaded.AGENT.updateConfig({ autoAdvanceEnabled: false });
+    });
+
+    const opts = ["A", "B", "C", "D"].map((L, i) => {
+      const b = el(doc, "button", {
+        text: `${L}. Lựa chọn ${L}`,
+        rect: { top: 150 + i * 48, left: 12, width: 340, height: 40 }
+      });
+      b.addEventListener("click", () => b.setAttribute("class", "selected"));
+      return b;
+    });
+
+    doc.body.appendChild(
+      el(doc, "div", { rect: { top: 80, left: 10, width: 360, height: 400 } }, [
+        el(doc, "p", { text: "Câu 1: Listener nằm ở span con." }),
+        ...opts,
+        outerPill
+      ])
+    );
+
+    loaded.AGENT._internalForTest.processScreen(false);
+    for (let i = 0; i < 140; i++) {
+      await new Promise((r) => origSetTimeout(r, 15));
+      if (spanClicks >= 1 && !loaded.AGENT.getDiagnostics().isSelfAdvancing) break;
+    }
+    const adv39b = loaded.AGENT.getDiagnostics().lastAdvance;
+    loaded.AGENT.cleanup();
+
+    assert.strictEqual(pillClicksBeforeSpan, 1, "Thử pill ngoài đúng 1 lần trước khi cascade xuống <span>");
+    assert.strictEqual(spanClicks, 1, "Sau khi pill ngoài không đổi DOM, phải fallback xuống <span> con 1 lần");
+    assert.strictEqual(adv39b?.changed, true);
+    assert.strictEqual(adv39b?.attempts, 2);
+    assert.strictEqual(adv39b?.targetTag, "SPAN");
+  }
+});
+
+test("40. Không bao giờ bấm nhầm nút trong modal Nộp bài; bắt TIẾP TỤC xuất hiện trễ nhưng giới hạn chống lặp", async () => {
+  // 40a: Modal Nộp bài ('Bạn có chắc chắn muốn nộp bài?' + 'Xác nhận'/'Nộp bài'/'Hoàn thành') bị chặn hoàn toàn
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const { AGENT } = loadModulesInEnv(env, async () => null);
+
+    const modal = el(doc, "div", { className: "ant-modal-content", attrs: { role: "dialog" }, rect: { top: 200, left: 30, width: 330, height: 220 } }, [
+      el(doc, "p", { text: "Bạn có chắc chắn muốn nộp bài?" }),
+      el(doc, "button", { text: "Xác nhận", rect: { top: 340, left: 200, width: 100, height: 40 } }),
+      el(doc, "button", { text: "Nộp bài", rect: { top: 340, left: 80, width: 100, height: 40 } }),
+      el(doc, "button", { text: "Hoàn thành", rect: { top: 390, left: 80, width: 120, height: 36 } })
+    ]);
+    const topBar = el(doc, "header", { rect: { top: 0, left: 0, width: 390, height: 54 } }, [
+      el(doc, "button", { text: "Tiếp tục", rect: { top: 10, left: 280, width: 90, height: 32 } })
+    ]);
+    const passiveText = el(doc, "div", { text: "Tiếp", rect: { top: 180, left: 20, width: 60, height: 24 } });
+    doc.body.appendChild(topBar);
+    doc.body.appendChild(passiveText);
+    doc.body.appendChild(modal);
+
+    const actions = AGENT._internalForTest.findActionButtons(doc);
+    assert.strictEqual(actions.submitBtn, null, "Không được nhận nút Xác nhận/Nộp bài trong modal");
+    assert.strictEqual(actions.nextBtn, null, "Không được nhận nút trong <header> hay text 'Tiếp' thụ động");
+  }
+
+  // 40b: Nút TIẾP TỤC xuất hiện trễ sau khi đã bấm TRẢ LỜI (không có chữ 'Đáp án đúng') vẫn chuyển câu & có giới hạn
+  {
+    const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+    const origSetTimeout = global.setTimeout;
+    let lateContinueClicks = 0;
+
+    const loaded = loadModulesInEnv(env, async (handler) => {
+      if (handler === "solveQuiz") {
+        return { success: true, result: { normalizedAns: "A", confidence: 97 } };
+      }
+      return null;
+    });
+    loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+    loaded.AGENT._internalForTest.resetState();
+
+    const submitBtn = el(doc, "div", {
+      className: "btn-submit",
+      cs: { cursor: "pointer" },
+      text: "TRẢ LỜI",
+      rect: { top: 760, left: 32, width: 326, height: 44 }
+    });
+    submitBtn.addEventListener("click", () => {
+      // Xóa nút TRẢ LỜI ngay nhưng chưa gắn TIẾP TỤC liền
+      submitBtn.remove();
+    });
+
+    const opts = ["A", "B", "C", "D"].map((L, i) => {
+      const b = el(doc, "button", {
+        text: `${L}. Phương án ${L}`,
+        rect: { top: 150 + i * 48, left: 12, width: 340, height: 40 }
+      });
+      b.addEventListener("click", () => b.setAttribute("class", "selected"));
+      return b;
+    });
+
+    const wrap = el(doc, "div", { rect: { top: 80, left: 10, width: 360, height: 400 } }, [
+      el(doc, "p", { text: "Câu 1: Nút tiếp tục đến trễ." }),
+      ...opts,
+      submitBtn
+    ]);
+    doc.body.appendChild(wrap);
+
+    loaded.AGENT._internalForTest.processScreen(false);
+    for (let i = 0; i < 160; i++) {
+      await new Promise((r) => origSetTimeout(r, 15));
+      if (!loaded.AGENT.getDiagnostics().isProcessing && !loaded.AGENT.getDiagnostics().isSelfAdvancing) break;
+    }
+
+    // Sau đó mới gắn TIẾP TỤC vào DOM nhưng cố tình không chuyển trang để kiểm tra trần chống lặp (<= 2 lần)
+    const lateNext = el(doc, "div", {
+      className: "next-pill",
+      cs: { cursor: "pointer" },
+      text: "TIẾP TỤC",
+      rect: { top: 760, left: 32, width: 326, height: 44 }
+    });
+    lateNext.addEventListener("click", () => {
+      lateContinueClicks += 1;
+    });
+    doc.body.appendChild(lateNext);
+
+    const r1 = loaded.AGENT._internalForTest.processScreen(false);
+    assert.strictEqual(r1.reason, "late_continue_advanced");
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => origSetTimeout(r, 15));
+      if (!loaded.AGENT.getDiagnostics().isProcessing) break;
+    }
+    const r3 = loaded.AGENT._internalForTest.processScreen(false);
+    loaded.AGENT.cleanup();
+
+    assert.ok(lateContinueClicks >= 1 && lateContinueClicks <= 2, `Chỉ bấm TIẾP TỤC tối đa 2 lần (thực tế: ${lateContinueClicks})`);
+    assert.strictEqual(r3.reason, "already_solved_sig", "Sau 2 lần không chuyển trang phải khóa chống lặp");
+  }
+});
+
 (async () => {
   let passed = 0;
   let failed = 0;
