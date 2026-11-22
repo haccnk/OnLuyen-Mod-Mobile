@@ -210,25 +210,35 @@ class SolverController extends ChangeNotifier {
     controller.addJavaScriptHandler(
       handlerName: 'takeScreenshot',
       callback: (args) async {
-        var quality = 92;
+        var quality = 82;
         if (args.isNotEmpty && args.first is Map) {
           final q = (args.first as Map)['quality'];
           if (q is num) quality = q.toInt().clamp(40, 100);
         }
         try {
-          final bytes = await _webViewController?.takeScreenshot(
+          final future = _webViewController?.takeScreenshot(
             screenshotConfiguration: ScreenshotConfiguration(
               compressFormat: CompressFormat.JPEG,
               quality: quality,
             ),
           );
-          if (bytes == null || bytes.isEmpty) return null;
+          if (future == null) {
+            return {'ok': false, 'error': 'WEBVIEW_UNAVAILABLE'};
+          }
+          final bytes = await future.timeout(
+            const Duration(milliseconds: 2000),
+            onTimeout: () => null,
+          );
+          if (bytes == null || bytes.isEmpty) {
+            return {'ok': false, 'error': 'SCREENSHOT_TIMEOUT'};
+          }
           return {
+            'ok': true,
             'mimeType': 'image/jpeg',
             'data': base64Encode(bytes),
           };
         } catch (e) {
-          return null;
+          return {'ok': false, 'error': 'SCREENSHOT_ERROR'};
         }
       },
     );

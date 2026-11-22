@@ -127,11 +127,14 @@
 
   function waitNextTwoFrames() {
     if (typeof globalScope.requestAnimationFrame === "function") {
-      return new Promise((resolve) => {
-        globalScope.requestAnimationFrame(() => {
-          globalScope.requestAnimationFrame(() => resolve());
-        });
-      });
+      return Promise.race([
+        new Promise((resolve) => {
+          globalScope.requestAnimationFrame(() => {
+            globalScope.requestAnimationFrame(() => resolve());
+          });
+        }),
+        waitMs(80)
+      ]);
     }
     return waitMs(34);
   }
@@ -149,6 +152,22 @@
       console.warn(`[OnLuyen Mod Mobile] callNative(${handlerName}) error:`, err);
     }
     return null;
+  }
+
+  async function callNativeWithTimeout(handlerName, payload, timeoutMs = 3000) {
+    let timerId = null;
+    try {
+      return await Promise.race([
+        callNative(handlerName, payload),
+        new Promise((resolve) => {
+          timerId = setTimeout(() => resolve(null), timeoutMs);
+        })
+      ]);
+    } catch (err) {
+      return null;
+    } finally {
+      if (timerId !== null) clearTimeout(timerId);
+    }
   }
 
   function startProcessingWatchdog(label = "", epoch = runEpoch) {
@@ -238,76 +257,65 @@
     }
   }
 
-  function dispatchClick(el, { scroll = true } = {}) {
+  function dispatchClick(el, { scroll = true, coordEl = null } = {}) {
     if (!el) return;
     if (scroll) scrollIfOffScreen(el);
     invalidateBodyTextCache();
-    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 10, top: 10, width: 20, height: 20 };
+    const rectSource = coordEl || el;
+    const r = rectSource.getBoundingClientRect ? rectSource.getBoundingClientRect() : { left: 10, top: 10, width: 20, height: 20 };
     const cx = (r.left || 0) + Math.max((r.width || 20) / 2, 4);
     const cy = (r.top || 0) + Math.max((r.height || 20) / 2, 4);
-    const downInit = {
+    const win = el.ownerDocument?.defaultView || globalScope;
+    const baseDownInit = {
       bubbles: true,
       cancelable: true,
       composed: true,
-      view: globalScope,
       button: 0,
       buttons: 1,
       detail: 1,
       clientX: cx,
       clientY: cy
     };
-    const upInit = {
-      ...downInit,
-      buttons: 0
+    const downInit = { ...baseDownInit, view: win };
+    const baseUpInit = { ...baseDownInit, buttons: 0 };
+    const upInit = { ...baseUpInit, view: win };
+
+    const safeDispatch = (EventCtor, type, initWithView, initNoView) => {
+      if (typeof EventCtor !== "function") return;
+      try {
+        el.dispatchEvent(new EventCtor(type, initWithView));
+      } catch (e) {
+        try {
+          el.dispatchEvent(new EventCtor(type, initNoView));
+        } catch (e2) {}
+      }
     };
-    try {
-      if (typeof globalScope.PointerEvent === "function") {
-        el.dispatchEvent(
-          new globalScope.PointerEvent("pointerdown", {
-            ...downInit,
-            pointerId: 1,
-            isPrimary: true,
-            pointerType: "touch"
-          })
-        );
-      }
-      if (typeof globalScope.MouseEvent === "function") {
-        el.dispatchEvent(new globalScope.MouseEvent("mousedown", downInit));
-      }
-      if (typeof globalScope.PointerEvent === "function") {
-        el.dispatchEvent(
-          new globalScope.PointerEvent("pointerup", {
-            ...upInit,
-            pointerId: 1,
-            isPrimary: true,
-            pointerType: "touch"
-          })
-        );
-      }
-      if (typeof globalScope.MouseEvent === "function") {
-        el.dispatchEvent(new globalScope.MouseEvent("mouseup", upInit));
-      }
-    } catch (e) {}
+
+    const pointerExtra = { pointerId: 1, isPrimary: true, pointerType: "touch" };
+    safeDispatch(globalScope.PointerEvent, "pointerdown", { ...downInit, ...pointerExtra }, { ...baseDownInit, ...pointerExtra });
+    safeDispatch(globalScope.MouseEvent, "mousedown", downInit, baseDownInit);
+    safeDispatch(globalScope.PointerEvent, "pointerup", { ...upInit, ...pointerExtra }, { ...baseUpInit, ...pointerExtra });
+    safeDispatch(globalScope.MouseEvent, "mouseup", upInit, baseUpInit);
 
     const tag = (el.tagName || "").toLowerCase();
-    const isNativeControl = tag === "input" || tag === "label" || tag === "button" || tag === "a";
-    if (isNativeControl && typeof el.click === "function") {
-      el.click();
-      if (tag === "input" && (el.type === "radio" || el.type === "checkbox") && el.checked !== true) {
-        try {
-          el.checked = true;
-          if (typeof globalScope.Event === "function") {
-            el.dispatchEvent(new globalScope.Event("input", { bubbles: true }));
-            el.dispatchEvent(new globalScope.Event("change", { bubbles: true }));
-          }
-        } catch (e) {}
-      }
-    } else if (typeof globalScope.MouseEvent === "function") {
+    if (typeof el.click === "function") {
       try {
-        el.dispatchEvent(new globalScope.MouseEvent("click", upInit));
+        el.click();
+      } catch (e) {
+        safeDispatch(globalScope.MouseEvent, "click", upInit, baseUpInit);
+      }
+    } else {
+      safeDispatch(globalScope.MouseEvent, "click", upInit, baseUpInit);
+    }
+
+    if (tag === "input" && (el.type === "radio" || el.type === "checkbox") && el.checked !== true) {
+      try {
+        el.checked = true;
+        if (typeof globalScope.Event === "function") {
+          el.dispatchEvent(new globalScope.Event("input", { bubbles: true }));
+          el.dispatchEvent(new globalScope.Event("change", { bubbles: true }));
+        }
       } catch (e) {}
-    } else if (typeof el.click === "function") {
-      el.click();
     }
   }
 
@@ -318,79 +326,18 @@
 
     const tag = (primaryEl.tagName || "").toLowerCase();
     const isNativeControl = tag === "input" || tag === "label" || tag === "button" || tag === "a";
-    if (isNativeControl) {
-      dispatchClick(primaryEl, { scroll: false });
-      return primaryEl;
-    }
-
-    const target =
-      leafEl &&
-      leafEl !== primaryEl &&
-      !isDisabledButton(leafEl, true) &&
-      !EXT.isEffectivelyHidden?.(leafEl) &&
-      typeof primaryEl.contains === "function" &&
-      primaryEl.contains(leafEl)
+    const target = isNativeControl
+      ? primaryEl
+      : leafEl &&
+          leafEl !== primaryEl &&
+          !isDisabledButton(leafEl, true) &&
+          !EXT.isEffectivelyHidden?.(leafEl) &&
+          typeof primaryEl.contains === "function" &&
+          primaryEl.contains(leafEl)
         ? leafEl
         : primaryEl;
 
-    const r = primaryEl.getBoundingClientRect
-      ? primaryEl.getBoundingClientRect()
-      : { left: 10, top: 10, width: 20, height: 20 };
-    const cx = (r.left || 0) + Math.max((r.width || 20) / 2, 4);
-    const cy = (r.top || 0) + Math.max((r.height || 20) / 2, 4);
-    const downInit = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view: globalScope,
-      button: 0,
-      buttons: 1,
-      detail: 1,
-      clientX: cx,
-      clientY: cy
-    };
-    const upInit = {
-      ...downInit,
-      buttons: 0
-    };
-
-    try {
-      if (typeof globalScope.PointerEvent === "function") {
-        target.dispatchEvent(
-          new globalScope.PointerEvent("pointerdown", {
-            ...downInit,
-            pointerId: 1,
-            isPrimary: true,
-            pointerType: "touch"
-          })
-        );
-      }
-      if (typeof globalScope.MouseEvent === "function") {
-        target.dispatchEvent(new globalScope.MouseEvent("mousedown", downInit));
-      }
-      if (typeof globalScope.PointerEvent === "function") {
-        target.dispatchEvent(
-          new globalScope.PointerEvent("pointerup", {
-            ...upInit,
-            pointerId: 1,
-            isPrimary: true,
-            pointerType: "touch"
-          })
-        );
-      }
-      if (typeof globalScope.MouseEvent === "function") {
-        target.dispatchEvent(new globalScope.MouseEvent("mouseup", upInit));
-      }
-    } catch (e) {}
-
-    if (typeof globalScope.MouseEvent === "function") {
-      try {
-        target.dispatchEvent(new globalScope.MouseEvent("click", upInit));
-      } catch (e) {}
-    } else if (typeof target.click === "function") {
-      target.click();
-    }
-
+    dispatchClick(target, { scroll: false, coordEl: primaryEl });
     return target;
   }
 
@@ -405,9 +352,17 @@
     return root && typeof root.contains === "function" ? root.contains(el) : true;
   }
 
+  function getElementDisplayText(el) {
+    if (!el) return "";
+    if (typeof el.innerText === "string" && el.innerText.trim()) {
+      return el.innerText;
+    }
+    return String(el.textContent || el.value || "");
+  }
+
   function normalizeActionLabel(el) {
     if (!el) return "";
-    let s = String(el.textContent || el.innerText || "");
+    let s = getElementDisplayText(el);
     if (typeof s.normalize === "function") {
       try {
         s = s.normalize("NFC");
@@ -530,10 +485,12 @@
     return /(btn|button|submit|answer|continue|next|action|pill|primary|confirm|cursor-pointer)/i.test(cls);
   }
 
-  function resolvePrimaryActionTarget(leafEl, labelText, doc = globalScope.document) {
+  function resolvePrimaryActionTarget(leafEl, labelText, doc = globalScope.document, includeSoftDisabled = false) {
     if (!leafEl) return null;
+    const isBlocked = (node, checkPE) =>
+      includeSoftDisabled ? node?.disabled === true : isDisabledButton(node, checkPE);
     const ctrl = findClosestControl(leafEl, doc);
-    if (ctrl && !isDisabledButton(ctrl, true)) {
+    if (ctrl && !isBlocked(ctrl, true)) {
       const ctrlLabel = normalizeActionLabel(ctrl);
       if (
         ctrlLabel.length > 0 &&
@@ -559,17 +516,17 @@
     }
 
     for (const item of chain) {
-      if (hasActionButtonStyling(item.el) && item.rect.width > 0 && item.rect.height > 0 && !isDisabledButton(item.el, true)) {
+      if (hasActionButtonStyling(item.el) && item.rect.width > 0 && item.rect.height > 0 && !isBlocked(item.el, true)) {
         return item.el;
       }
     }
 
     const leafRect = leafEl.getBoundingClientRect ? leafEl.getBoundingClientRect() : { width: 0, height: 0 };
-    if (leafRect.width > 0 && leafRect.height > 0 && !isDisabledButton(leafEl, true)) {
+    if (leafRect.width > 0 && leafRect.height > 0 && !isBlocked(leafEl, true)) {
       return leafEl;
     }
     for (const item of chain) {
-      if (item.rect.width > 0 && item.rect.height > 0 && !isDisabledButton(item.el, true)) {
+      if (item.rect.width > 0 && item.rect.height > 0 && !isBlocked(item.el, true)) {
         return item.el;
       }
     }
@@ -629,7 +586,10 @@
     return out.slice(0, 4);
   }
 
-  function findActionButtons(doc = globalScope.document, { allowIconFallback = true } = {}) {
+  function findActionButtons(
+    doc = globalScope.document,
+    { allowIconFallback = true, includeSoftDisabled = false } = {}
+  ) {
     let submitBtn = null;
     let nextBtn = null;
     let submitLeaf = null;
@@ -638,12 +598,15 @@
     let nextText = "";
 
     const bodyHasSubmitModal = SUBMIT_MODAL_RE.test(getVisibleBodyText(doc));
-    const nodes = doc?.querySelectorAll?.("button, [role='button'], a, div, span, p, b, strong") || [];
+    const nodes =
+      doc?.querySelectorAll?.(
+        "button, [role='button'], a, div, span, p, b, strong, label, input[type='button'], input[type='submit']"
+      ) || [];
     const rawMatches = [];
 
     for (const el of nodes) {
-      if ((el.children?.length || 0) > 4) continue;
-      const raw = String(el.textContent || el.innerText || "").trim();
+      if ((el.children?.length || 0) > 6) continue;
+      const raw = getElementDisplayText(el).trim();
       if (raw.length === 0 || raw.length > 36) continue;
       const t = normalizeActionLabel(el);
       if (!t || t.length > 22) continue;
@@ -671,16 +634,18 @@
     });
 
     for (const m of leafMatches) {
-      const primaryEl = resolvePrimaryActionTarget(m.el, m.label, doc);
+      const primaryEl = resolvePrimaryActionTarget(m.el, m.label, doc, includeSoftDisabled);
       if (!primaryEl) continue;
       if (EXT.isEffectivelyHidden?.(m.el) || EXT.isEffectivelyHidden?.(primaryEl)) continue;
       if (isDisallowedActionContainer(primaryEl, doc)) continue;
-      if (isDisabledButton(m.el, false) || isDisabledButton(primaryEl, true)) continue;
+      const disabledNow = includeSoftDisabled
+        ? m.el.disabled === true || primaryEl.disabled === true
+        : isDisabledButton(m.el, false) || isDisabledButton(primaryEl, true);
+      if (disabledNow) continue;
 
       const pr = primaryEl.getBoundingClientRect ? primaryEl.getBoundingClientRect() : { top: 0, width: 0, height: 0 };
       const lr = m.el.getBoundingClientRect ? m.el.getBoundingClientRect() : { top: 0, width: 0, height: 0 };
       if ((pr.width === 0 || pr.height === 0) && (lr.width === 0 || lr.height === 0)) continue;
-      if (Math.max(pr.top || 0, lr.top || 0) < 60) continue;
 
       // Giống Ultra PC: chọn nút khớp cuối cùng ở phía dưới màn hình (actionBtns[length - 1])
       if (m.isSubmit) {
@@ -1096,7 +1061,7 @@
       try {
         const cs = typeof globalScope.getComputedStyle === "function" ? globalScope.getComputedStyle(node) : node.style;
         if (cs) {
-          sig += `|${cs.backgroundColor || ""}|${cs.borderColor || cs.borderTopColor || ""}|${cs.color || ""}`;
+          sig += `|${cs.backgroundColor || ""}|${cs.borderColor || cs.borderTopColor || ""}|${cs.color || ""}|${cs.boxShadow || ""}|${cs.outlineColor || ""}|${cs.fontWeight || ""}`;
         }
       } catch (e) {}
       parts.push(sig);
@@ -1115,7 +1080,7 @@
         try {
           const pcs = typeof globalScope.getComputedStyle === "function" ? globalScope.getComputedStyle(rootParent) : rootParent.style;
           if (pcs) {
-            pSig += `|${pcs.backgroundColor || ""}|${pcs.borderColor || pcs.borderTopColor || ""}|${pcs.color || ""}`;
+            pSig += `|${pcs.backgroundColor || ""}|${pcs.borderColor || pcs.borderTopColor || ""}|${pcs.color || ""}|${pcs.boxShadow || ""}|${pcs.outlineColor || ""}|${pcs.fontWeight || ""}`;
           }
         } catch (e) {}
         parts.push(pSig);
@@ -1159,7 +1124,6 @@
         scrollIfOffScreen(mcq[idx].rowEl || mcq[idx].badgeEl);
         const rawCandidates = getMcqClickCandidates(mcq[idx], scopeDoc);
         const candidates = rawCandidates.length === 1 ? [rawCandidates[0], rawCandidates[0]] : rawCandidates;
-        const preClickFp = expectedFingerprint ? computeLiveQuestionFingerprint(scopeDoc) || expectedFingerprint : "";
         const beforeSnaps = captureMcqVisualSnapshots(mcq);
 
         const tryCandidate = (candIdx, attemptsSoFar) => {
@@ -1200,27 +1164,6 @@
               };
               finish({ autoAdvanced: true, verified: true });
               return;
-            }
-            if (preClickFp) {
-              const postClickFp = computeLiveQuestionFingerprint(scopeDoc);
-              const sameExplicitCode = Boolean(
-                expectedQCode &&
-                  /^#\d{5,}$/.test(expectedQCode) &&
-                  getVisibleBodyText(scopeDoc).includes(expectedQCode)
-              );
-              if (postClickFp && postClickFp !== preClickFp && !sameExplicitCode) {
-                lastClickInfo = {
-                  ans: ansStr,
-                  attempts: nextAttempts,
-                  verified: true,
-                  via: "fpChanged",
-                  candidateCount: candidates.length,
-                  targetTag: target.tagName || "",
-                  targetClass: String(target.className || "").slice(0, 60)
-                };
-                finish({ autoAdvanced: true, verified: true });
-                return;
-              }
             }
             const nowSelected = EXT.detectUIAns("MCQ", mcq, null, null);
             if (nowSelected === ansStr) {
@@ -1350,31 +1293,53 @@
   // =========================================================================
   // HỆ THỐNG XỬ LÝ HÌNH ẢNH 3 LỚP (LỚP 1 -> AUTO CAPTURE STAGE -> MULTI-SCROLL)
   // =========================================================================
+  function cleanupOrphanCaptureStage() {
+    try {
+      globalScope.document?.getElementById?.("__onluyen_capture_stage")?.remove?.();
+    } catch (e) {}
+  }
+
   async function prepareVisualAttachments(payload, classified, isManualRetry = false) {
     if (!payload?.hasVisuals && !isManualRetry) {
       return [];
     }
 
     const images = [];
-    const layer1 = await EXT.extractVisualAssetsLayer1(payload.visualDescriptors || []);
-    for (const img of layer1.inlineImages) {
+    const emptyLayer1 = { inlineImages: [], remoteUrls: [], stageTargets: [], elMap: {} };
+    let layer1 = emptyLayer1;
+    try {
+      layer1 = await Promise.race([
+        EXT.extractVisualAssetsLayer1(payload.visualDescriptors || []),
+        waitMs(1800).then(() => emptyLayer1)
+      ]);
+      if (!layer1 || typeof layer1 !== "object") layer1 = emptyLayer1;
+    } catch (e) {
+      layer1 = emptyLayer1;
+    }
+
+    for (const img of (layer1.inlineImages || []).slice(0, 3)) {
       images.push({ label: img.label, mimeType: img.mimeType, data: img.data });
     }
 
-    const stageTargets = [...layer1.stageTargets];
+    const stageTargets = [...(layer1.stageTargets || [])];
+    const remoteItems = (layer1.remoteUrls || []).slice(0, 3);
 
-    if (layer1.remoteUrls.length > 0) {
-      const fetched = await callNative("fetchImagesWithCookies", {
-        pageUrl: globalScope.location?.href || "https://app.onluyen.vn/",
-        items: layer1.remoteUrls
-      });
+    if (remoteItems.length > 0) {
+      const fetched = await callNativeWithTimeout(
+        "fetchImagesWithCookies",
+        {
+          pageUrl: globalScope.location?.href || "https://app.onluyen.vn/",
+          items: remoteItems
+        },
+        3200
+      );
       const fetchedMap = new Map();
       if (Array.isArray(fetched)) {
         for (const item of fetched) {
           if (item && item.id) fetchedMap.set(item.id, item);
         }
       }
-      for (const reqItem of layer1.remoteUrls) {
+      for (const reqItem of remoteItems) {
         const resItem = fetchedMap.get(reqItem.id);
         if (resItem && resItem.ok && resItem.data) {
           images.push({
@@ -1382,7 +1347,7 @@
             mimeType: resItem.mimeType || "image/png",
             data: resItem.data
           });
-        } else if (layer1.elMap[reqItem.id]) {
+        } else if (layer1.elMap?.[reqItem.id]) {
           stageTargets.push({
             id: reqItem.id,
             label: reqItem.label,
@@ -1393,51 +1358,66 @@
       }
     }
 
-    // LỚP 2: Auto Capture Stage (Bẻ HTML dựng sân khấu phóng lớn nền trắng để chụp)
-    if (stageTargets.length > 0) {
-      await callNative("setFloatingPillVisible", { visible: false });
+    // LỚP 2: Auto Capture Stage (Bẻ HTML dựng sân khấu phóng lớn nền trắng để chụp — có hard timeout chống treo)
+    const boundedStageTargets = stageTargets.slice(0, 2);
+    if (boundedStageTargets.length > 0) {
+      await callNativeWithTimeout("setFloatingPillVisible", { visible: false }, 500);
       try {
-        await waitMs(60);
-        for (const target of stageTargets.slice(0, 3)) {
-          const stage = EXT.mountCaptureStage(target.el, target.label);
+        await waitMs(40);
+        for (const target of boundedStageTargets) {
+          const stage = EXT.mountCaptureStage ? EXT.mountCaptureStage(target.el, target.label) : null;
           if (!stage) continue;
           try {
             await waitNextTwoFrames();
-            const shot = await callNative("takeScreenshot", { quality: 92, label: target.label });
-            if (shot && shot.data) {
+            const shot = await callNativeWithTimeout(
+              "takeScreenshot",
+              { quality: 82, label: target.label || "stage_capture" },
+              2200
+            );
+            const b64 = shot?.data || shot?.base64 || "";
+            if (shot && shot.ok !== false && b64) {
               images.push({
                 label: target.label,
                 mimeType: shot.mimeType || "image/jpeg",
-                data: shot.data
+                data: b64
               });
             }
           } finally {
-            stage.unmount();
+            try {
+              stage.unmount();
+            } catch (e) {}
+            cleanupOrphanCaptureStage();
           }
         }
       } finally {
-        await callNative("setFloatingPillVisible", { visible: true });
+        cleanupOrphanCaptureStage();
+        await callNativeWithTimeout("setFloatingPillVisible", { visible: true }, 500);
       }
     }
 
     // LỚP 3: Cuộn gom đa khung (Fallback cuối khi không clone/bóc được ảnh hoặc câu giải lại thủ công)
     if (images.length === 0 && (payload.hasVisuals || isManualRetry)) {
-      const zones = EXT.collectScrollFallbackZones(payload, classified);
+      const zones = (EXT.collectScrollFallbackZones(payload, classified) || []).slice(0, 2);
       if (zones.length > 0) {
         const prevScrollX = globalScope.scrollX || globalScope.pageXOffset || 0;
         const prevScrollY = globalScope.scrollY || globalScope.pageYOffset || 0;
-        await callNative("setFloatingPillVisible", { visible: false });
+        await callNativeWithTimeout("setFloatingPillVisible", { visible: false }, 500);
         try {
-          await waitMs(60);
+          await waitMs(40);
           for (const z of zones) {
             scrollTargetIntoCenter(z.el);
             await waitNextTwoFrames();
-            const shot = await callNative("takeScreenshot", { quality: 92, label: z.label });
-            if (shot && shot.data) {
+            const shot = await callNativeWithTimeout(
+              "takeScreenshot",
+              { quality: 82, label: z.label || "scroll_fallback" },
+              2200
+            );
+            const b64 = shot?.data || shot?.base64 || "";
+            if (shot && shot.ok !== false && b64) {
               images.push({
                 label: z.label,
                 mimeType: shot.mimeType || "image/jpeg",
-                data: shot.data
+                data: b64
               });
             }
           }
@@ -1447,12 +1427,26 @@
               globalScope.scrollTo({ left: prevScrollX, top: prevScrollY, behavior: "instant" });
             }
           } catch (e) {}
-          await callNative("setFloatingPillVisible", { visible: true });
+          await callNativeWithTimeout("setFloatingPillVisible", { visible: true }, 500);
         }
       }
     }
 
     return images;
+  }
+
+  async function safePrepareVisualAttachments(payload, classified, isManualRetry = false) {
+    try {
+      const imgs = await Promise.race([
+        prepareVisualAttachments(payload, classified, isManualRetry),
+        waitMs(6500).then(() => [])
+      ]);
+      return Array.isArray(imgs) ? imgs : [];
+    } catch (e) {
+      return [];
+    } finally {
+      cleanupOrphanCaptureStage();
+    }
   }
 
   function getNavState() {
@@ -1596,7 +1590,7 @@
         await waitMs(220);
         if (!isRunAlive(myEpoch, false)) return;
 
-        const images = await prepareVisualAttachments(payload, classified, true);
+        const images = await safePrepareVisualAttachments(payload, classified, true);
         if (!isRunAlive(myEpoch, false)) return;
 
         const res = await requestNativeSolve({
@@ -1708,7 +1702,7 @@
       await waitMs(220);
       if (!isRunAlive(myEpoch, false)) return;
 
-      const images = await prepareVisualAttachments(payload, classified, true);
+      const images = await safePrepareVisualAttachments(payload, classified, true);
       if (!isRunAlive(myEpoch, false)) return;
 
       const res = await requestNativeSolve({
@@ -1863,7 +1857,7 @@
     await waitMs(40);
     if (!isRunAlive(myEpoch, true)) return;
 
-    const images = await prepareVisualAttachments(task.payload, task.classified, false);
+    const images = await safePrepareVisualAttachments(task.payload, task.classified, false);
     if (!isRunAlive(myEpoch, true)) return;
 
     const res = await requestNativeSolve({
@@ -2015,8 +2009,7 @@
           return t1;
         };
 
-        const preFp = alreadyAutoAdvanced ? "__AUTO_ADVANCED__" : liveFingerprintAcrossDocs();
-        if (alreadyAutoAdvanced || (preFp && preFp !== currentFingerprint)) {
+        if (alreadyAutoAdvanced) {
           await waitMs(350);
           if (!isRunAlive(myEpoch, true)) return;
           isSelfAdvancing = false;
@@ -2038,13 +2031,11 @@
             if (!isRunAlive(myEpoch, true)) return;
             invalidateBodyTextCache();
             if (dismissSubmitModal()) return;
-            const liveCheckFp = liveFingerprintAcrossDocs();
-            if (liveCheckFp && liveCheckFp !== currentFingerprint) {
-              changed = true;
-              break;
-            }
             actions = findButtonsAcrossDocs();
             if (actions.submitBtn || actions.nextBtn) break;
+          }
+          if (!actions.submitBtn && !actions.nextBtn) {
+            actions = findButtonsAcrossDocs({ includeSoftDisabled: true });
           }
         }
 
@@ -2432,7 +2423,7 @@
         await waitMs(40);
         if (!isRunAlive(myEpoch, true)) return;
 
-        const images = await prepareVisualAttachments(payload, classified, false);
+        const images = await safePrepareVisualAttachments(payload, classified, false);
         if (!isRunAlive(myEpoch, true)) return;
 
         const res = await requestNativeSolve({
@@ -2530,6 +2521,24 @@
           (applyOutcome) => {
             if (!isRunAlive(myEpoch, true)) return;
             if (applyOutcome?.verified === false) {
+              let fallbackActions = findActionButtons(scopeDoc, {
+                allowIconFallback: false,
+                includeSoftDisabled: true
+              });
+              if (!fallbackActions.submitBtn && scopeDoc !== globalScope.document) {
+                fallbackActions = findActionButtons(globalScope.document, {
+                  allowIconFallback: false,
+                  includeSoftDisabled: true
+                });
+              }
+              if (autoAdvanceEnabled && fallbackActions.submitBtn) {
+                advanceSingleStep(curSig, myEpoch, {
+                  alreadyAutoAdvanced: false,
+                  qLabel: qCode,
+                  scopeDoc
+                });
+                return;
+              }
               isProcessing = false;
               syncStatus(
                 `⚠️ Đã giải ${qCode}: ${normAns} nhưng web chưa nhận click — chọn tay hoặc bấm 🔄 Giải lại`,
@@ -2756,6 +2765,7 @@
       return t.length <= 16 && (/^\d{1,2}:\d{2}(:\d{2})?$/.test(t) || EXT.isInsideNavOrChrome(p));
     }
     if (node.nodeType === 1) {
+      if (node.id === "__onluyen_capture_stage" || node.closest?.("#__onluyen_capture_stage")) return true;
       const tag = (node.tagName || "").toLowerCase();
       if (["button", "input", "textarea", "table", "li", "label", "form", "iframe"].includes(tag)) return false;
       const txt = (node.textContent || "").trim();
@@ -2768,11 +2778,19 @@
   function isTimerOnlyMutationList(mutations) {
     if (!Array.isArray(mutations) || mutations.length === 0) return false;
     for (const m of mutations) {
+      const added = Array.from(m?.addedNodes || []);
+      const removed = Array.from(m?.removedNodes || []);
+      const isCaptureStageMutation =
+        (added.length > 0 || removed.length > 0) &&
+        added.every((n) => n?.id === "__onluyen_capture_stage") &&
+        removed.every((n) => n?.id === "__onluyen_capture_stage");
+      if (isCaptureStageMutation) continue;
+
       if (!isTimerOnlyNode(m?.target)) return false;
-      const added = m.addedNodes || [];
       for (let i = 0; i < added.length; i++) {
         const n = added[i];
         if (n.nodeType === 1) {
+          if (n.id === "__onluyen_capture_stage") continue;
           const tag = (n.tagName || "").toLowerCase();
           if (["button", "input", "textarea", "table", "li", "label", "div", "form", "iframe"].includes(tag)) {
             return false;

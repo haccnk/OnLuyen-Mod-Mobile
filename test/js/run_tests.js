@@ -2441,6 +2441,199 @@ test("41. Chống rối loạn chuyển câu: TRẢ LỜI phản hồi chậm 60
   assert.strictEqual(q2SubmitClicks, 1, "Câu 2 chỉ giải xong mới bấm TRẢ LỜI");
 });
 
+test("42. Bấm TRẢ LỜI trên div (native click + boxShadow + đổi fingerprint nhẹ + hidden hotkey span + top=45) -> TIẾP TỤC sang Câu 2", async () => {
+  const { doc, env } = createTestEnvironment({
+    innerWidth: 390,
+    innerHeight: 844,
+    url: "https://app.onluyen.vn/practice/step-shadow"
+  });
+  const origSetTimeout = global.setTimeout;
+  const solvedQuestions = [];
+  let q1SubmitCount = 0;
+  let q1ContCount = 0;
+  let q2Selected = false;
+
+  const loaded = loadModulesInEnv(env, async (handler, args) => {
+    if (handler === "solveQuiz") {
+      solvedQuestions.push(args.rawScreenText);
+      return { success: true, result: { normalizedAns: "B", confidence: 97 } };
+    }
+    return null;
+  });
+  loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 20)));
+  loaded.AGENT._internalForTest.resetState();
+
+  const renderQ2 = () => {
+    doc.body.childNodes = [];
+    const cards2 = ["A", "B", "C", "D"].map((L, i) => {
+      const c = el(doc, "div", {
+        className: "choice-box",
+        cs: { cursor: "pointer", boxShadow: "none" },
+        rect: { top: 180 + i * 54, left: 16, width: 350, height: 46 }
+      }, [
+        el(doc, "span", { text: `${L}. Q2-${L}`, rect: { top: 190 + i * 54, left: 26, width: 240, height: 22 } })
+      ]);
+      c.addEventListener("click", () => {
+        if (L === "B") q2Selected = true;
+        c.setComputedStyle({ boxShadow: "0 0 0 2px #1d4ed8" });
+        loaded.AGENT.updateConfig({ autoAdvanceEnabled: false });
+      });
+      return c;
+    });
+    doc.body.appendChild(el(doc, "div", { rect: { top: 64, left: 10, width: 370, height: 400 } }, [
+      el(doc, "p", { text: "Câu 2: Tính 5 + 5?" }),
+      ...cards2
+    ]));
+  };
+
+  const hintSpan = el(doc, "span", { text: "", rect: { top: 108, left: 16, width: 200, height: 20 } });
+  const cards1 = ["A", "B", "C", "D"].map((L, i) => {
+    const card = el(doc, "div", {
+      className: "choice-box",
+      cs: { cursor: "pointer", boxShadow: "none" },
+      rect: { top: 180 + i * 54, left: 16, width: 350, height: 46 }
+    }, [
+      el(doc, "span", { text: `${L}. Đáp án ${L}`, rect: { top: 190 + i * 54, left: 28, width: 240, height: 22 } })
+    ]);
+    card.addEventListener("click", () => {
+      cards1.forEach((x) => x.setComputedStyle({ boxShadow: "none" }));
+      card.setComputedStyle({ boxShadow: "0 0 0 2px #1d4ed8" });
+      // Làm lệch nhẹ stemText/fingerprint sau khi tích đáp án nhưng vẫn ở Câu 1
+      hintSpan.textContent = "(Đã chọn đáp án)";
+    });
+    return card;
+  });
+
+  const q1Box = el(doc, "div", { rect: { top: 64, left: 10, width: 370, height: 460 } }, [
+    el(doc, "p", { text: "Câu 1: Tìm nghiệm phương trình x + 1 = 3." }),
+    hintSpan,
+    ...cards1
+  ]);
+
+  const hiddenHotkey = el(doc, "span", { text: "Hotkey", style: { display: "none" }, rect: { top: 45, left: 100, width: 0, height: 0 } });
+  const visibleLabel = el(doc, "span", { text: "TRẢ LỜI", rect: { top: 45, left: 150, width: 80, height: 22 } });
+  const btnAnswer = el(doc, "div", {
+    className: "btn-answer rounded-full",
+    cs: { cursor: "pointer" },
+    rect: { top: 45, left: 32, width: 326, height: 44 }
+  }, [hiddenHotkey, visibleLabel]);
+  btnAnswer._innerText = "TRẢ LỜI";
+  visibleLabel._innerText = "TRẢ LỜI";
+  btnAnswer.addEventListener("click", () => {
+    q1SubmitCount += 1;
+    btnAnswer.remove();
+    const btnCont = el(doc, "div", {
+      className: "btn-answer rounded-full",
+      cs: { cursor: "pointer" },
+      rect: { top: 45, left: 32, width: 326, height: 44 }
+    }, [el(doc, "span", { text: "TIẾP TỤC", rect: { top: 45, left: 150, width: 90, height: 22 } })]);
+    btnCont.addEventListener("click", () => {
+      q1ContCount += 1;
+      renderQ2();
+    });
+    doc.body.appendChild(btnCont);
+  });
+
+  doc.body.appendChild(q1Box);
+  doc.body.appendChild(btnAnswer);
+
+  loaded.AGENT._internalForTest.processScreen(false);
+  for (let i = 0; i < 120; i++) {
+    await new Promise((r) => origSetTimeout(r, 15));
+    if (q2Selected && !loaded.AGENT.getDiagnostics().isProcessing && !loaded.AGENT.getDiagnostics().isSelfAdvancing) break;
+  }
+  loaded.AGENT.cleanup();
+
+  assert.strictEqual(q1SubmitCount, 1, "Phải bấm được TRẢ LỜI trên thẻ div dù fingerprint câu đổi nhẹ & top < 60");
+  assert.ok(btnAnswer.clickCount >= 1 || visibleLabel.clickCount >= 1, "Phải gọi native .click() trên thẻ div/span");
+  assert.strictEqual(q1ContCount, 1, "Phải bấm tiếp TIẾP TỤC để sang Câu 2");
+  assert.strictEqual(q2Selected, true);
+  assert.strictEqual(solvedQuestions.length, 2);
+});
+
+test("43. Câu hỏi đồ thị (<svg>): chống treo hoàn toàn khi requestAnimationFrame đơ và takeScreenshot không phản hồi", async () => {
+  const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
+  const origSetTimeout = global.setTimeout;
+  // Giả lập WebView treo requestAnimationFrame (không bao giờ gọi callback)
+  env.requestAnimationFrame = () => 1;
+
+  let solveCalledWithText = "";
+  let submitClicks = 0;
+  let stageSeenDuringCall = false;
+
+  const loaded = loadModulesInEnv(env, async (handler, args) => {
+    if (handler === "takeScreenshot") {
+      if (doc.getElementById("__onluyen_capture_stage")) stageSeenDuringCall = true;
+      // Giả lập Android takeScreenshot treo vô thời hạn
+      return new Promise(() => {});
+    }
+    if (handler === "solveQuiz") {
+      solveCalledWithText = args.rawScreenText || "";
+      return { success: true, result: { normalizedAns: "B", confidence: 91 } };
+    }
+    return null;
+  });
+  loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.min(80, Math.round(ms / 40))));
+  loaded.AGENT._internalForTest.resetState();
+
+  const graphSvg = el(doc, "svg", {
+    width: 320,
+    height: 200,
+    rect: { top: 140, left: 20, width: 320, height: 200 }
+  }, [
+    el(doc, "path", { d: "M 10 180 Q 160 10 310 180" })
+  ]);
+
+  const opts = ["A", "B", "C", "D"].map((L, i) => {
+    const b = el(doc, "button", {
+      text: `${L}. y = x^2 - ${i}`,
+      rect: { top: 360 + i * 48, left: 16, width: 340, height: 42 }
+    });
+    b.addEventListener("click", () => {
+      opts.forEach((x) => x.setAttribute("class", ""));
+      b.setAttribute("class", "selected");
+    });
+    return b;
+  });
+
+  const submitBtn = el(doc, "div", {
+    className: "btn-submit",
+    cs: { cursor: "pointer" },
+    rect: { top: 620, left: 32, width: 326, height: 44 }
+  }, [el(doc, "span", { text: "TRẢ LỜI", rect: { top: 630, left: 150, width: 90, height: 22 } })]);
+  submitBtn.addEventListener("click", () => {
+    submitClicks += 1;
+    loaded.AGENT.updateConfig({ autoAdvanceEnabled: false });
+  });
+
+  doc.body.appendChild(el(doc, "div", { rect: { top: 80, left: 10, width: 370, height: 500 } }, [
+    el(doc, "p", {}, ["Cho đồ thị hàm số như hình vẽ dưới đây:", graphSvg]),
+    ...opts
+  ]));
+  doc.body.appendChild(submitBtn);
+
+  // Kiểm tra trực tiếp prepareVisualAttachments không đơ và tự gỡ stage
+  const cls = loaded.EXT.classifyQuestionInScope(doc, true);
+  const payload = loaded.EXT.extractQuestionPayload(doc, cls);
+  const directImgs = await loaded.AGENT._internalForTest.prepareVisualAttachments(payload, cls, false);
+  assert.strictEqual(stageSeenDuringCall, true);
+  assert.strictEqual(Array.isArray(directImgs), true);
+  assert.strictEqual(doc.getElementById("__onluyen_capture_stage"), null, "Phải tự gỡ overlay kể cả khi takeScreenshot treo");
+
+  // Kiểm tra luồng giải hoàn chỉnh trên câu đồ thị vẫn tích và bấm TRẢ LỜI trơn tru
+  loaded.AGENT._internalForTest.processScreen(false);
+  for (let i = 0; i < 160; i++) {
+    await new Promise((r) => origSetTimeout(r, 15));
+    if (submitClicks >= 1 && !loaded.AGENT.getDiagnostics().isProcessing && !loaded.AGENT.getDiagnostics().isSelfAdvancing) break;
+  }
+  loaded.AGENT.cleanup();
+
+  assert.strictEqual(doc.getElementById("__onluyen_capture_stage"), null, "Không bao giờ để sót overlay khóa màn hình");
+  assert.ok(solveCalledWithText.includes("[HÌNH_ĐỒ_THỊ]"), "Vẫn phải gọi AI giải câu đồ thị thay vì kẹt");
+  assert.strictEqual(loaded.EXT.detectUIAns("MCQ", cls.mcq, null, null), "B");
+  assert.strictEqual(submitClicks, 1, "Phải bấm TRẢ LỜI sau khi giải xong câu đồ thị");
+});
+
 (async () => {
   let passed = 0;
   let failed = 0;

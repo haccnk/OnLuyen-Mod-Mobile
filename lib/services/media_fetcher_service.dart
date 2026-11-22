@@ -19,14 +19,17 @@ class MediaFetcherService {
 
     String cookieHeader = '';
     try {
-      final cookies = await CookieManager.instance().getCookies(url: WebUri(pageUrl));
+      final cookies = await CookieManager.instance()
+          .getCookies(url: WebUri(pageUrl))
+          .timeout(const Duration(milliseconds: 1500), onTimeout: () => const <Cookie>[]);
       if (cookies.isNotEmpty) {
         cookieHeader = cookies.map((c) => '${c.name}=${c.value}').join('; ');
       }
     } catch (_) {}
 
+    final boundedItems = items.take(3).toList();
     final results = await Future.wait(
-      items.map((item) async {
+      boundedItems.map((item) async {
         final id = (item['id'] ?? '').toString();
         final urlStr = (item['url'] ?? '').toString();
         if (urlStr.isEmpty) {
@@ -43,7 +46,7 @@ class MediaFetcherService {
             headers['Cookie'] = cookieHeader;
           }
 
-          final resp = await _httpClient.get(uri, headers: headers).timeout(const Duration(seconds: 8));
+          final resp = await _httpClient.get(uri, headers: headers).timeout(const Duration(seconds: 3));
           if (resp.statusCode < 200 || resp.statusCode >= 300) {
             return {'id': id, 'ok': false, 'status': resp.statusCode};
           }

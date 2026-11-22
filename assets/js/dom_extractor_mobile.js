@@ -557,6 +557,17 @@
     }
 
     if (tag === "svg") {
+      const svgCls = String(node.getAttribute?.("class") || "");
+      const hasMathJaxMml = Boolean(
+        node.querySelector?.('use[xlink\\:href^="#MJX"], use[href^="#MJX"], g[data-mml-node]')
+      );
+      if (
+        /\b(MathJax|mjx)\b/i.test(svgCls) ||
+        hasMathJaxMml ||
+        (node.getAttribute?.("focusable") === "false" && node.getAttribute?.("role") === "img" && hasMathJaxMml)
+      ) {
+        return "";
+      }
       const r = safeRect(node);
       const w = Math.round(r.width || Number(node.getAttribute?.("width")) || 0);
       const h = Math.round(r.height || Number(node.getAttribute?.("height")) || 0);
@@ -1793,7 +1804,7 @@
       try {
         const img = new globalScope.Image();
         const encoded = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(info.svgMarkup);
-        const timer = setTimeout(() => resolve(null), 1500);
+        const timer = setTimeout(() => resolve(null), 500);
         img.onload = () => {
           clearTimeout(timer);
           try {
@@ -1822,6 +1833,7 @@
     const remoteUrls = [];
     const stageTargets = [];
     const elMap = {};
+    let svgAttempts = 0;
 
     for (const d of descriptors || []) {
       if (d.el) elMap[d.id] = d.el;
@@ -1854,7 +1866,8 @@
       }
 
       if (d.type === "svg" && d.el) {
-        const png = await rasterizeSvgTo2xPng(d.el);
+        const png = svgAttempts < 2 ? await rasterizeSvgTo2xPng(d.el) : null;
+        svgAttempts += 1;
         if (png) {
           inlineImages.push({
             id: d.id,
