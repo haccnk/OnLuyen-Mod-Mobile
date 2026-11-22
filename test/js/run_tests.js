@@ -2099,7 +2099,6 @@ test("39. Chờ nút 'TRẢ LỜI' mở khóa disabled & safe fallback xuống <
     const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
     const origSetTimeout = global.setTimeout;
     let pillClicks = 0;
-    let pillClicksBeforeSpan = 0;
     let spanClicks = 0;
 
     const loaded = loadModulesInEnv(env, async (handler) => {
@@ -2126,10 +2125,9 @@ test("39. Chờ nút 'TRẢ LỜI' mở khóa disabled & safe fallback xuống <
       [innerSpan]
     );
     outerPill.addEventListener("click", () => {
-      pillClicks += 1; // Chỉ ghi nhận click trực tiếp và nổi bọt, cố tình không chuyển trang
+      pillClicks += 1;
     });
     innerSpan.addEventListener("click", () => {
-      pillClicksBeforeSpan = pillClicks;
       spanClicks += 1;
       doc.body.childNodes = [];
       doc.body.appendChild(
@@ -2168,15 +2166,15 @@ test("39. Chờ nút 'TRẢ LỜI' mở khóa disabled & safe fallback xuống <
     const adv39b = loaded.AGENT.getDiagnostics().lastAdvance;
     loaded.AGENT.cleanup();
 
-    assert.strictEqual(pillClicksBeforeSpan, 1, "Thử pill ngoài đúng 1 lần trước khi cascade xuống <span>");
-    assert.strictEqual(spanClicks, 1, "Sau khi pill ngoài không đổi DOM, phải fallback xuống <span> con 1 lần");
+    assert.strictEqual(spanClicks, 1, "Bấm đúng 1 lần vào <span> con ngay phát đầu tiên");
+    assert.strictEqual(pillClicks, 1, "Click nổi bọt lên pill ngoài đúng 1 lần (không click bão)");
     assert.strictEqual(adv39b?.changed, true);
-    assert.strictEqual(adv39b?.attempts, 2);
+    assert.strictEqual(adv39b?.attempts, 1);
     assert.strictEqual(adv39b?.targetTag, "SPAN");
   }
 });
 
-test("40. Không bao giờ bấm nhầm nút trong modal Nộp bài; bắt TIẾP TỤC xuất hiện trễ nhưng giới hạn chống lặp", async () => {
+test("40. Không bao giờ bấm nhầm nút trong modal Nộp bài; bắt TIẾP TỤC xuất hiện trễ nhưng khóa 1 lần chống lặp", async () => {
   // 40a: Modal Nộp bài ('Bạn có chắc chắn muốn nộp bài?' + 'Xác nhận'/'Nộp bài'/'Hoàn thành') bị chặn hoàn toàn
   {
     const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
@@ -2201,7 +2199,7 @@ test("40. Không bao giờ bấm nhầm nút trong modal Nộp bài; bắt TIẾ
     assert.strictEqual(actions.nextBtn, null, "Không được nhận nút trong <header> hay text 'Tiếp' thụ động");
   }
 
-  // 40b: Nút TIẾP TỤC xuất hiện trễ sau khi đã bấm TRẢ LỜI (không có chữ 'Đáp án đúng') vẫn chuyển câu & có giới hạn
+  // 40b: Nút TIẾP TỤC xuất hiện trễ sau khi đã bấm TRẢ LỜI (không có chữ 'Đáp án đúng') chỉ bấm ĐÚNG 1 LẦN rồi khóa
   {
     const { doc, env } = createTestEnvironment({ innerWidth: 390, innerHeight: 844 });
     const origSetTimeout = global.setTimeout;
@@ -2223,7 +2221,6 @@ test("40. Không bao giờ bấm nhầm nút trong modal Nộp bài; bắt TIẾ
       rect: { top: 760, left: 32, width: 326, height: 44 }
     });
     submitBtn.addEventListener("click", () => {
-      // Xóa nút TRẢ LỜI ngay nhưng chưa gắn TIẾP TỤC liền
       submitBtn.remove();
     });
 
@@ -2249,7 +2246,6 @@ test("40. Không bao giờ bấm nhầm nút trong modal Nộp bài; bắt TIẾ
       if (!loaded.AGENT.getDiagnostics().isProcessing && !loaded.AGENT.getDiagnostics().isSelfAdvancing) break;
     }
 
-    // Sau đó mới gắn TIẾP TỤC vào DOM nhưng cố tình không chuyển trang để kiểm tra trần chống lặp (<= 2 lần)
     const lateNext = el(doc, "div", {
       className: "next-pill",
       cs: { cursor: "pointer" },
@@ -2270,9 +2266,179 @@ test("40. Không bao giờ bấm nhầm nút trong modal Nộp bài; bắt TIẾ
     const r3 = loaded.AGENT._internalForTest.processScreen(false);
     loaded.AGENT.cleanup();
 
-    assert.ok(lateContinueClicks >= 1 && lateContinueClicks <= 2, `Chỉ bấm TIẾP TỤC tối đa 2 lần (thực tế: ${lateContinueClicks})`);
-    assert.strictEqual(r3.reason, "already_solved_sig", "Sau 2 lần không chuyển trang phải khóa chống lặp");
+    assert.strictEqual(lateContinueClicks, 1, "Chỉ được bấm TIẾP TỤC đúng 1 lần (rồi khóa vĩnh viễn cho câu đó)");
+    assert.strictEqual(r3.reason, "already_solved_sig", "Sau 1 lần không chuyển trang phải khóa chống lặp");
   }
+});
+
+test("41. Chống rối loạn chuyển câu: TRẢ LỜI phản hồi chậm 600ms + số toán học {2; 4; 6; 8} + icon chevron bẫy", async () => {
+  const { doc, env } = createTestEnvironment({
+    innerWidth: 390,
+    innerHeight: 844,
+    url: "https://app.onluyen.vn/doing/13153797"
+  });
+  const origSetTimeout = global.setTimeout;
+  const solvedQCodes = [];
+  let q1SubmitClicks = 0;
+  let q1ContinueClicks = 0;
+  let q2SubmitClicks = 0;
+  let decoyChevronClicks = 0;
+  let mathSpanClicks = 0;
+
+  const loaded = loadModulesInEnv(env, async (handler, args) => {
+    if (handler === "solveQuiz") {
+      solvedQCodes.push(args.qCode);
+      return { success: true, result: { normalizedAns: args.qCode === "#13153797" ? "C" : "A", confidence: 99 } };
+    }
+    return null;
+  });
+  loaded.sandbox.setTimeout = (fn, ms) => origSetTimeout(fn, Math.max(1, Math.round(ms / 15)));
+  loaded.AGENT._internalForTest.resetState();
+
+  const decoyChevron = el(
+    doc,
+    "button",
+    { className: "carousel-next", rect: { top: 300, left: 330, width: 38, height: 38 } },
+    [el(doc, "i", { className: "fa fa-chevron-right" })]
+  );
+  decoyChevron.addEventListener("click", () => {
+    decoyChevronClicks += 1;
+  });
+
+  const makeBottomNav = (child) =>
+    el(
+      doc,
+      "nav",
+      {
+        className: "bottom-nav",
+        cs: { position: "fixed" },
+        style: { position: "fixed" },
+        rect: { top: 770, left: 0, width: 390, height: 64 }
+      },
+      [child]
+    );
+
+  const renderQ2 = () => {
+    doc.body.childNodes = [];
+    const cards2 = [];
+    const optRows2 = ["A", "B", "C", "D"].map((L, i) => {
+      const y = 220 + i * 62;
+      const card = el(doc, "div", {
+        className: "answer-item-box",
+        cs: { cursor: "pointer" },
+        rect: { top: y, left: 14, width: 356, height: 52 }
+      }, [
+        el(doc, "span", { className: "opt-badge", text: L, rect: { top: y + 12, left: 24, width: 26, height: 26 } }),
+        el(doc, "span", { text: `${(i + 1) * 10}`, rect: { top: y + 12, left: 62, width: 200, height: 24 } })
+      ]);
+      card.addEventListener("click", () => {
+        cards2.forEach((c) => c.setAttribute("class", "answer-item-box"));
+        card.setAttribute("class", "answer-item-box selected");
+      });
+      cards2.push(card);
+      return card;
+    });
+    const submit2 = el(
+      doc,
+      "div",
+      { className: "btn-submit", cs: { cursor: "pointer" }, rect: { top: 780, left: 32, width: 326, height: 44 } },
+      [el(doc, "span", { text: "TRẢ LỜI", rect: { top: 790, left: 150, width: 90, height: 22 } })]
+    );
+    submit2.addEventListener("click", () => {
+      q2SubmitClicks += 1;
+      loaded.AGENT.updateConfig({ autoAdvanceEnabled: false });
+    });
+    doc.body.appendChild(
+      el(doc, "div", { rect: { top: 64, left: 10, width: 370, height: 520 } }, [
+        el(doc, "div", { text: "Câu: 2 #13153798 | Báo lỗi | Đánh dấu", rect: { top: 72, left: 12, width: 350, height: 28 } }),
+        el(doc, "p", { text: "Tính 5 + 5.", rect: { top: 112, left: 12, width: 350, height: 50 } }),
+        ...optRows2
+      ])
+    );
+    doc.body.appendChild(makeBottomNav(submit2));
+  };
+
+  const mathNums = ["4", "6", "8", "2"];
+  const cards1 = [];
+  const optRows1 = ["A", "B", "C", "D"].map((L, i) => {
+    const y = 240 + i * 64;
+    const mathSpan = el(doc, "span", {
+      text: mathNums[i],
+      rect: { top: y + 12, left: 120, width: 24, height: 24 }
+    });
+    mathSpan.addEventListener("click", () => {
+      mathSpanClicks += 1;
+    });
+    const card = el(doc, "div", {
+      className: "answer-item-box",
+      cs: { cursor: "pointer" },
+      rect: { top: y, left: 14, width: 356, height: 54 }
+    }, [
+      el(doc, "span", { className: "opt-badge", text: L, rect: { top: y + 12, left: 24, width: 26, height: 26 } }),
+      el(doc, "span", { text: "B\\A = {", rect: { top: y + 12, left: 60, width: 56, height: 24 } }),
+      mathSpan,
+      el(doc, "span", { text: "}.", rect: { top: y + 12, left: 150, width: 20, height: 24 } })
+    ]);
+    card.addEventListener("click", () => {
+      cards1.forEach((c) => c.setAttribute("class", "answer-item-box"));
+      card.setAttribute("class", "answer-item-box selected");
+    });
+    cards1.push(card);
+    return card;
+  });
+
+  const q1Card = el(doc, "div", { rect: { top: 64, left: 10, width: 370, height: 540 } }, [
+    el(doc, "div", { text: "Câu: 1 #13153797 | Báo lỗi | Đánh dấu", rect: { top: 72, left: 12, width: 350, height: 28 } }),
+    el(doc, "p", { text: "Cho A = {0; 2; 5}, B = {2; 4; 6; 8}. Tìm B\\A.", rect: { top: 112, left: 12, width: 350, height: 56 } }),
+    ...optRows1,
+    decoyChevron
+  ]);
+
+  const submit1 = el(
+    doc,
+    "div",
+    { className: "btn-submit", cs: { cursor: "pointer" }, rect: { top: 780, left: 32, width: 326, height: 44 } },
+    [el(doc, "span", { text: "TRẢ LỜI", rect: { top: 790, left: 150, width: 90, height: 22 } })]
+  );
+  const bottomNav1 = makeBottomNav(submit1);
+  submit1.addEventListener("click", () => {
+    q1SubmitClicks += 1;
+    // Phản hồi API chậm 600ms mới hiện Đáp án đúng + TIẾP TỤC (nút TRẢ LỜI vẫn giữ nguyên trong lúc chờ)
+    loaded.sandbox.setTimeout(() => {
+      q1Card.appendChild(el(doc, "p", { text: "Đáp án đúng: C" }));
+      bottomNav1.childNodes = [];
+      const contDiv = el(
+        doc,
+        "div",
+        { className: "btn-next", cs: { cursor: "pointer" }, rect: { top: 780, left: 32, width: 326, height: 44 } },
+        [el(doc, "span", { text: "TIẾP TỤC", rect: { top: 790, left: 150, width: 90, height: 22 } })]
+      );
+      contDiv.addEventListener("click", () => {
+        q1ContinueClicks += 1;
+        renderQ2();
+      });
+      bottomNav1.appendChild(contDiv);
+    }, 600);
+  });
+
+  doc.body.appendChild(q1Card);
+  doc.body.appendChild(bottomNav1);
+
+  loaded.AGENT._internalForTest.processScreen(false);
+  for (let i = 0; i < 160; i++) {
+    await new Promise((r) => origSetTimeout(r, 15));
+    if (q2SubmitClicks >= 1 && !loaded.AGENT.getDiagnostics().isProcessing && !loaded.AGENT.getDiagnostics().isSelfAdvancing) {
+      break;
+    }
+  }
+  loaded.AGENT.cleanup();
+
+  assert.strictEqual(q1SubmitClicks, 1, "TRẢ LỜI chỉ được bấm ĐÚNG 1 lần dù server phản hồi chậm 600ms");
+  assert.strictEqual(decoyChevronClicks, 0, "Tuyệt đối không bấm nhầm nút icon .fa-chevron-right bẫy");
+  assert.strictEqual(mathSpanClicks, 0, "Tuyệt đối không bấm nhầm các số toán học 2, 4, 6, 8");
+  assert.strictEqual(q1ContinueClicks, 1, "TIẾP TỤC chỉ được bấm ĐÚNG 1 lần khi xuất hiện ở giây thứ 0.6");
+  assert.deepStrictEqual(solvedQCodes, ["#13153797", "#13153798"], "Phải giải đúng thứ tự Câu 1 -> Câu 2");
+  assert.strictEqual(q2SubmitClicks, 1, "Câu 2 chỉ giải xong mới bấm TRẢ LỜI");
 });
 
 (async () => {
